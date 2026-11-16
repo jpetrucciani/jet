@@ -1,0 +1,27 @@
+[package]
+name = "jet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+jet-cli.workspace = true
+jet-config.workspace = true
+jet-core.workspace = true
+jet-font.workspace = true
+jet-pty.workspace = true
+jet-render.workspace = true
+libghostty-vt.workspace = true
+resvg.workspace = true
+wgpu.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+arboard.workspace = true
+libc.workspace = true
+winit.workspace = true
+
+[lints]
+workspace = true

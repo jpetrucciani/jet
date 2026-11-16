@@ -1,0 +1,14 @@
+---
+source: crates/jet-replay/src/main.rs
+expression: text
+---
+xe one
+line replaced
+>>line three
+
+col1    col2    col3
+
+
+
+
+                   absolute

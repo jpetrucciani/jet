@@ -1,0 +1,175 @@
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+# Every push to main checks whether [workspace.package] version has a release
+# yet, and publishes v<version> with binaries for all three platforms if its
+# tag doesn't exist. So bumping the version releases it, a failed release is
+# retried by the next push (or workflow_dispatch), and other pushes stop at
+# detect. It is one workflow because a tag pushed with GITHUB_TOKEN triggers
+# no other workflow, and the release (which creates the tag) only runs once
+# every build has succeeded.
+jobs:
+  detect:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      release: ${{ steps.version.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          # ls-remote exits 2 when the tag is missing; anything else nonzero is a failed lookup.
+          rc=0
+          git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null || rc=$?
+          case $rc in
+            0) echo "v$version already exists; nothing to release"; release=false ;;
+            2) release=true ;;
+            *) exit "$rc" ;;
+          esac
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          echo "release=$release" >>"$GITHUB_OUTPUT"
+
+  # Each build runs a default.nix dist_* script, so a release is built the
+  # same way locally.
+  linux:
+    needs: detect
+    if: needs.detect.outputs.release == 'true'
+    # dist_linux links against the runner's glibc, so this image sets the
+    # oldest distro the binaries run on. Keep it the oldest Ubuntu available.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-linux
+          workspaces: |
+            . -> target/portable
+            . -> target/pgo/build
+      - run: nix-shell --run dist_linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: target/dist/*.tar.gz
+          if-no-files-found: error
+
+  # A PGO profile only fits the target it was recorded on, so Windows's is
+  # recorded on Windows: an instrumented build from Linux runs there, and
+  # the release build uses what it recorded.
+  windows-pgo-build:
+    needs: detect
+    if: needs.detect.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-windows-pgo
+          workspaces: ". -> target/pgo/win-build"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/cargo-xwin
+          key: cargo-xwin-v1
+      - run: nix-shell --run pgo_win_bundle
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-pgo-bundle
+          path: target/pgo/win-bundle
+          if-no-files-found: error
+
+  windows-pgo-run:
+    needs: windows-pgo-build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-pgo-bundle
+          path: bundle
+      - run: bundle\run.cmd
+        shell: cmd
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-pgo-raw
+          path: bundle/raw/*.profraw
+          if-no-files-found: error
+
+  windows:
+    needs: windows-pgo-run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-windows
+      # The MSVC CRT and SDK cargo-xwin downloads.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/cargo-xwin
+          key: cargo-xwin-v1
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-pgo-raw
+          path: target/pgo/win-raw
+      - run: nix-shell --run dist_win
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: target/dist/*.zip
+          if-no-files-found: error
+
+  macos:
+    needs: detect
+    if: needs.detect.outputs.release == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-macos
+          workspaces: |
+            . -> target/portable
+            . -> target/pgo/build
+      - run: nix-shell --run dist_mac
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: target/dist/*.zip
+          if-no-files-found: error
+
+  release:
+    needs: [detect, linux, windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      # gh creates the tag at this commit along with the release.
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.detect.outputs.version }}
+        run: |
+          ls -l dist
+          gh release create "v$VERSION" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "jet $VERSION" \
+            --generate-notes

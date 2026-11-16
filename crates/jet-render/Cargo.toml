@@ -1,0 +1,15 @@
+[package]
+name = "jet-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bytemuck.workspace = true
+jet-core.workspace = true
+jet-font.workspace = true
+pollster.workspace = true
+wgpu.workspace = true
+
+[lints]
+workspace = true

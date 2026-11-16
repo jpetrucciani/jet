@@ -1,0 +1,15 @@
+.db
+.direnv
+/result*
+
+# rust
+debug/
+target/
+**/*.rs.bk
+*.pdb
+
+/shots
+/tmp
+
+# written by `notices`; the dist_* scripts generate their own
+/THIRD-PARTY-NOTICES

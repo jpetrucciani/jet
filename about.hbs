@@ -1,0 +1,19 @@
+Third-party notices for jet
+
+jet includes the third-party software below. Each license applies only to
+the software listed under it.
+
+{{#each licenses}}
+================================================================================
+{{{name}}}
+
+Used by:
+{{#each used_by}}
+{{#if crate.source}}
+  {{crate.name}} {{crate.version}}{{#if crate.repository}} ({{crate.repository}}){{/if}}
+{{/if}}
+{{/each}}
+
+{{{text}}}
+
+{{/each}}

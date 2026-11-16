@@ -1,0 +1,28 @@
+---
+source: crates/jet-replay/src/main.rs
+expression: text
+---
+scroll line 8
+scroll line 9
+ccroll line 12
+d
+e
+scroll line 13
+scroll line 14
+scroll line 15
+scroll line 16
+after region17
+scroll line 18
+scroll line 19
+scroll line 20
+scroll line 21
+scroll line 22
+scroll line 23
+scroll line 24
+scroll line 25
+scroll line 26
+scroll line 27
+scroll line 28
+scroll line 29
+scroll line 30
+top

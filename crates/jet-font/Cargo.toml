@@ -1,0 +1,18 @@
+[package]
+name = "jet-font"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+harfrust.workspace = true
+swash.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+fontdb.workspace = true
+
+[lints]
+workspace = true

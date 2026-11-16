@@ -1,0 +1,216 @@
+# jet's config, every key at its default. Copying this file as-is changes
+# nothing; uncomment and edit what you want. A test loads this file, so it
+# stays in step with what jet accepts.
+#
+# Where jet looks (the first that exists):
+#   $JET_CONFIG
+#   ~/.jet/config.toml                      (every platform)
+#   %APPDATA%\jet\config.toml               (Windows)
+#   $XDG_CONFIG_HOME/jet/config.toml, else ~/.config/jet/config.toml
+#
+# `jet config check` prints the files read, any warnings, and the effective
+# config. Edits apply as soon as the file is saved; a config that doesn't
+# load keeps the previous one and shows a banner.
+#
+# Colors are "#rrggbb", "rrggbb" or "#rgb". Sizes in DIPs are pixels at 100%
+# display scaling. "Windows only" keys are accepted elsewhere and ignored, so
+# one file serves every machine.
+
+[font]
+# family = "JetBrains Mono"   # an installed family, any case; unset or not
+                              # found: the bundled JetBrains Mono
+size = 12.0                   # points
+features = []                 # OpenType features over the defaults:
+                              # ["-calt"] drops ligatures, ["ss01", "zero"]
+
+[theme]
+# name = "Poimandres"         # a Ghostty theme: a path, or a file name in
+                              # themes/ beside this config or Ghostty's.
+                              # [colors] below override it.
+
+[colors]
+# foreground = "#a6accd"      # unset: jet's defaults, or the theme's
+# background = "#1b1e28"
+# cursor = "#add7ff"          # unset: jet's default, or the theme's
+# palette = { 0 = "#1b1e28", 1 = "#d0679d", 2 = "#5de4c7" }   # any of 0-255
+
+[window]
+padding = 4                   # DIPs around the grid
+columns = 100                 # initial size, in cells
+rows = 30
+opacity = 1.0                 # of the default background only; text and
+                              # colored cells stay solid
+decorations = "system"        # system: the OS's title bar
+                              # custom: jet's, with the tabs in it (macOS keeps
+                              #   its traffic lights; restart to switch there)
+                              # none: no title bar; drag by the tab bar
+color-scheme = "auto"         # auto (from the background) | dark | light:
+                              # the frame, buttons and backdrop
+backdrop = "none"             # Windows only, with opacity < 1:
+                              # none | mica | acrylic | tabbed
+corners = "default"           # Windows only: default | round | small | square
+titlebar-color = "background" # Windows only: background | system | #rrggbb
+border-color = "system"       # Windows only: system | none | background | #rrggbb
+taskbar-progress = true       # Windows only: OSC 9;4 progress on the taskbar
+
+[tab-bar]
+show = "auto"                 # auto (2+ tabs) | always | never
+position = "top"              # top | bottom | left | right
+width = 24                    # cells, when left or right
+# background = "#1b1e28"      # unset: from the terminal's colors
+# foreground = "#a6accd"
+# active-background = "#303340"
+# active-foreground = "#ffffff"
+
+[shell]
+# command = "pwsh -NoLogo"    # a line (double quotes group; backslashes are
+                              # literal) or an argv array:
+                              # ["C:/Program Files/Git/bin/bash.exe", "-l"]
+                              # unset: pwsh, else Windows PowerShell, else cmd
+                              # on Windows; the login shell elsewhere
+# icon = "🐚"                 # before its tabs' titles: any text, an .svg
+                              # file (~/ or beside this config), or inline
+                              # '<svg viewBox="0 0 24 24">...</svg>'
+
+# Named shells, opened with new_tab:<name> or new_split:<side>:<name>.
+# [profiles.ubuntu]
+# command = "wsl.exe -d Ubuntu"   # unset: [shell]'s
+# icon = "🐧"
+# cwd = "C:/src"                  # unset: where the focused shell is
+
+[terminal]
+scrollback = 10000            # lines of history
+copy-on-select = true         # selecting copies to the clipboard
+clipboard-write = true        # programs may set the clipboard (OSC 52, as tmux
+                              # and Neovim do over SSH); they can never read it
+notifications = true          # desktop notifications programs ask for (OSC 9,
+                              # OSC 777), except from the pane you're looking at
+
+[cursor]
+style = "block"               # block | bar | underline
+blink = true
+
+# Segments about the focused pane. None by default.
+[status]
+position = "titlebar"         # titlebar: beside the window buttons, with
+                              #   decorations = "custom" (else bottom)
+                              # tab-bar: the tab bar's end
+                              # top | bottom: a row of their own
+style = "powerline"           # powerline | round | plain
+
+# A segment hides while any {field} in it is empty. Fields: {title} {cwd}
+# {dir} {host} {user} {ssh} {process} {profile} {tab} {tabs} {time} {date}
+# {progress} {exit} (the last command's status when it failed, from shells
+# that send OSC 133) and {var.NAME} (set with OSC 1337 SetUserVar). {{ and }} are
+# literal braces. More in docs/status.md.
+#
+# [[status.segments]]
+# text = "{user}@{host}"
+# background = "#5de4c7"      # unset: alternating shades of the bar
+# foreground = "#1b1e28"
+# align = "right"             # left | right, in a top or bottom row
+#
+# [[status.segments]]
+# text = "⎈ {var.k8s}"
+#
+# [[status.segments]]
+# text = "{time}"
+
+# `jet quake`: a window a global hotkey shows and hides. Running `jet quake`
+# again toggles it too: on Linux, which has no hotkey here, bind that in
+# your desktop's shortcuts (it runs on X11 or XWayland).
+[quake]
+hotkey = "ctrl+space"         # a chord as in [keybinds], Windows and macOS
+                              # ("ctrl+grave" there: Ctrl+Space switches input
+                              # sources). Ctrl+Space is also Windows' CJK IME
+                              # toggle; "super+grave" avoids it
+monitor = "cursor"            # cursor (the one under the mouse) | primary
+x = 0.0                       # placement as fractions of the monitor's work
+y = 0.0                       # area: the left third is width = 0.333,
+width = 1.0                   # height = 1.0
+height = 0.45
+hide-on-blur = true           # hide when another window takes the focus
+always-on-top = true
+taskbar = false               # show in the taskbar and Alt+Tab (macOS: the
+                              # Dock, read at start; ignored on Linux)
+
+# Ghostty's chord and action names, so `keybind = ...` lines carry over.
+# Modifiers: ctrl, shift, alt (opt), super (cmd, win). Keys: a-z, 0-9,
+# f1-f24, enter, tab, escape, space, backspace, delete, insert, home, end,
+# page_up, page_down, left, right, up, down, equal (plus), minus, comma,
+# period, slash, semicolon, quote, bracket_left, bracket_right, backslash,
+# grave.
+#
+# Actions: copy_to_clipboard, paste_from_clipboard, new_tab[:profile],
+# close_surface, close_tab, next_tab, previous_tab, goto_tab:N, last_tab,
+# new_split:right|down|left|up[:profile], goto_split:left|right|up|down|
+# previous|next, increase_font_size:PT, decrease_font_size:PT,
+# reset_font_size, jump_to_prompt:N (negative is up) and copy_command_output
+# (both need a shell that marks prompts with OSC 133; unbound by default for
+# the latter), start_search, end_search, navigate_search:next|previous (next
+# goes up, to older output), toggle_command_palette, toggle_split_zoom,
+# reload_config, ignore (swallow the key), unbind (give it back to the
+# program).
+#
+# The find bar searches the focused pane's screen and history as you type,
+# matching case only when the query has capitals. Enter or Up goes to the
+# match above, Shift+Enter or Down the one below, Escape closes it. The
+# palette runs any of the actions above by name.
+[keybinds]
+# defaults = false            # start from no bindings at all
+#
+# The defaults on Windows and Linux:
+# "ctrl+shift+c" = "copy_to_clipboard"
+# "ctrl+insert" = "copy_to_clipboard"
+# "ctrl+shift+v" = "paste_from_clipboard"
+# "shift+insert" = "paste_from_clipboard"
+# "ctrl+t" = "new_tab"        # unbind it to give Ctrl+T back to fzf/readline
+# "ctrl+shift+t" = "new_tab"
+# "ctrl+shift+w" = "close_surface"
+# "ctrl+tab" = "next_tab"
+# "ctrl+shift+tab" = "previous_tab"
+# "ctrl+page_down" = "next_tab"
+# "ctrl+page_up" = "previous_tab"
+# "alt+1" = "goto_tab:1"      # through alt+8
+# "alt+9" = "last_tab"
+# "ctrl+shift+o" = "new_split:right"
+# "ctrl+shift+e" = "new_split:down"
+# "ctrl+alt+left" = "goto_split:left"   # and right, up, down
+# "ctrl+shift+bracket_left" = "goto_split:previous"
+# "ctrl+shift+bracket_right" = "goto_split:next"
+# "ctrl+equal" = "increase_font_size:1"
+# "ctrl+plus" = "increase_font_size:1"
+# "ctrl+minus" = "decrease_font_size:1"
+# "ctrl+0" = "reset_font_size"
+# "ctrl+shift+page_up" = "jump_to_prompt:-1"
+# "ctrl+shift+page_down" = "jump_to_prompt:1"
+# "ctrl+shift+f" = "start_search"
+# "ctrl+shift+p" = "toggle_command_palette"
+# "ctrl+shift+enter" = "toggle_split_zoom"
+#
+# On macOS they're Command chords instead, as in Ghostty: cmd+c, cmd+v,
+# cmd+t, cmd+w, cmd+1..9, cmd+d / cmd+shift+d (split right / down),
+# cmd+alt+arrows, cmd+[ and cmd+], cmd+shift+[ and cmd+shift+] (tabs),
+# cmd+= / cmd+- / cmd+0, cmd+up / cmd+down (prompts), cmd+f, cmd+g and
+# cmd+shift+g (search), cmd+shift+p (palette), cmd+shift+enter (zoom), plus
+# ctrl+tab.
+#
+# Your own, for example:
+# "ctrl+shift+d" = "new_split:right"
+# "ctrl+shift+u" = "new_tab:ubuntu"
+# "ctrl+t" = "unbind"
+
+# Ghostty settings, passed through. If config-file is unset and a Ghostty
+# config exists (~/.config/ghostty/config or config.ghostty,
+# %LOCALAPPDATA%\ghostty\ on Windows, ~/Library/Application Support/
+# com.mitchellh.ghostty/ on macOS), jet imports it. Keys above win over
+# keys here, which win over the imported file. Supported: font-family,
+# font-size, font-feature, theme, palette, background, foreground,
+# cursor-color, background-opacity, window-padding-x/y, command, keybind,
+# cursor-style, cursor-style-blink, copy-on-select, clipboard-write,
+# desktop-notifications.
+# Others log a warning and are ignored.
+[ghostty]
+# config-file = "~/.config/ghostty/config"   # or false to skip the import
+# cursor-style = "bar"
+# font-feature = ["-calt"]

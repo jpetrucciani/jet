@@ -1,0 +1,14 @@
+# cargo-about config for THIRD-PARTY-NOTICES (`notices` in default.nix).
+# Licenses in preference order; a crate under anything else fails the build.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+# Only what ends up in the shipped binaries.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true

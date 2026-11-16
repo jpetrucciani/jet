@@ -1,0 +1,14 @@
+# x86-64 builds need AVX2 and friends (x86-64-v3: Intel Haswell, AMD Zen
+# and later), for a faster jet; libghostty's matching Zig CPU is set in
+# default.nix. Apple Silicon builds already target the M1.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=x86-64-v3"]
+
+# ship a single jet.exe without needing the VC++ redistributable.
+# 4099: the static CRT references PDBs that xwin doesn't download.
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-C", "link-arg=/ignore:4099",
+    "-C", "target-cpu=x86-64-v3",
+]

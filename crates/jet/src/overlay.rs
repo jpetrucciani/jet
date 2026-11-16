@@ -1,0 +1,471 @@
+//! The find bar and the command palette: boxes jet draws over the focused
+//! pane, which take the keyboard while open.
+
+use std::sync::Arc;
+
+use jet_config::keybinds::Action;
+use jet_core::{Cell, CellFlags, Cursor, CursorShape, Key, KeyAction, KeyInput, Line, Matches};
+use jet_core::{Mods, Rgb, Snapshot};
+
+use crate::layout::PaneId;
+
+/// Search matches: the current one stands out from the rest.
+const MATCH_BG: Rgb = Rgb {
+    r: 0xe5,
+    g: 0xc0,
+    b: 0x7b,
+};
+const CURRENT_BG: Rgb = Rgb {
+    r: 0xff,
+    g: 0x8c,
+    b: 0x3b,
+};
+const MATCH_FG: Rgb = Rgb {
+    r: 0x1b,
+    g: 0x1e,
+    b: 0x28,
+};
+/// The find bar's width in cells, when the pane has them.
+const FIND_WIDTH: usize = 40;
+const PALETTE_WIDTH: usize = 72;
+const PALETTE_ROWS: usize = 12;
+
+pub enum Overlay {
+    Find(Find),
+    Palette(Palette),
+}
+
+/// What a key did to an overlay.
+#[derive(Debug, PartialEq)]
+pub enum Outcome {
+    /// Not a key it uses.
+    Nothing,
+    /// Redraw: the query (and for the find bar, the search) changed.
+    Edited,
+    /// Redraw: the palette's selection moved.
+    Moved,
+    Close,
+    /// To the `n`th match up (negative) or down.
+    Step(isize),
+    Run(Action),
+}
+
+/// The colors overlays draw with: text on a box a step off the terminal's
+/// background, and a further step for what's selected.
+#[derive(Clone, Copy)]
+pub struct Colors {
+    pub background: Rgb,
+    pub foreground: Rgb,
+    pub selected: Rgb,
+}
+
+impl Colors {
+    fn cell(&self, selected: bool, faint: bool) -> Cell {
+        let mut cell = Cell::default();
+        cell.fg = Some(self.foreground);
+        cell.bg = Some(if selected {
+            self.selected
+        } else {
+            self.background
+        });
+        cell.flags.set(CellFlags::FAINT, faint);
+        cell
+    }
+}
+
+/// A one-line text field, edited at its end.
+#[derive(Default)]
+struct Field(String);
+
+impl Field {
+    /// Apply an editing key; whether the text changed, `None` for a key
+    /// that isn't one.
+    fn edit(&mut self, input: &KeyInput) -> Option<bool> {
+        let mods = input.mods;
+        let word = mods.intersects(Mods::CTRL | Mods::ALT);
+        match input.key {
+            Key::Backspace if word => {
+                let kept = self.0.trim_end();
+                let cut = kept
+                    .rfind(|c: char| c.is_whitespace() || "/\\.-_:".contains(c))
+                    .map_or(0, |i| i + 1);
+                let changed = cut != self.0.len();
+                self.0.truncate(cut);
+                Some(changed)
+            }
+            Key::Backspace => Some(self.0.pop().is_some()),
+            Key::U if mods.contains(Mods::CTRL) => {
+                let changed = !self.0.is_empty();
+                self.0.clear();
+                Some(changed)
+            }
+            _ => {
+                let text = input.text.as_deref()?;
+                if mods.intersects(Mods::CTRL | Mods::ALT | Mods::SUPER) {
+                    return None;
+                }
+                let text: String = text.chars().filter(|c| !c.is_control()).collect();
+                self.0.push_str(&text);
+                Some(!text.is_empty())
+            }
+        }
+    }
+
+    /// Typed text pasted in: its first line.
+    fn paste(&mut self, text: &str) -> bool {
+        let line = text.lines().next().unwrap_or_default();
+        let line: String = line.chars().filter(|c| !c.is_control()).collect();
+        self.0.push_str(&line);
+        !line.is_empty()
+    }
+}
+
+/// The find bar over a pane.
+pub struct Find {
+    pub pane: PaneId,
+    query: Field,
+}
+
+impl Find {
+    pub fn new(pane: PaneId) -> Self {
+        Self {
+            pane,
+            query: Field::default(),
+        }
+    }
+
+    pub fn query(&self) -> &str {
+        &self.query.0
+    }
+
+    pub fn key(&mut self, input: &KeyInput) -> Outcome {
+        if input.action == KeyAction::Release {
+            return Outcome::Nothing;
+        }
+        let back = if input.mods.contains(Mods::SHIFT) {
+            1
+        } else {
+            -1
+        };
+        match input.key {
+            Key::Escape => Outcome::Close,
+            Key::Enter | Key::F3 => Outcome::Step(back),
+            Key::ArrowUp => Outcome::Step(-1),
+            Key::ArrowDown => Outcome::Step(1),
+            _ => edited(self.query.edit(input)),
+        }
+    }
+
+    pub fn paste(&mut self, text: &str) -> Outcome {
+        edited(Some(self.query.paste(text)))
+    }
+
+    /// Draw the bar over the top right of `snapshot`, with the cursor in
+    /// it when `typing`.
+    pub fn draw(&self, snapshot: &mut Snapshot, colors: Colors, typing: bool) {
+        let cols = usize::from(snapshot.cols);
+        let width = cols.min(FIND_WIDTH);
+        let count = match &snapshot.search {
+            _ if self.query.0.is_empty() => String::new(),
+            None => "…".to_owned(),
+            Some(Matches { total: 0, .. }) => "no matches".to_owned(),
+            Some(m) => {
+                let more = if m.total >= Matches::CAP { "+" } else { "" };
+                let at = m.current.map_or(0, |i| i + 1);
+                format!("{at}/{}{more}", m.total)
+            }
+        };
+        let label = " find ";
+        let count_w = Line::text_width(&count) + 1;
+        let field_w = width.saturating_sub(Line::text_width(label) + count_w);
+        // The query's end shows when it's longer than the field.
+        let query = tail(&self.query.0, field_w.saturating_sub(1));
+        let mut line = Line::default();
+        line.push_text(label, Line::text_width(label), colors.cell(true, true));
+        line.push_text(query, field_w, colors.cell(false, false));
+        line.push_text(&count, count_w.saturating_sub(1), colors.cell(false, true));
+        line.push_text(" ", 1, colors.cell(false, false));
+        let x = cols - line.cells.len().min(cols);
+        if let Some(top) = snapshot.lines.first_mut() {
+            *top = Arc::new(top.with_overlay(x, &line));
+        }
+        let cursor = x + Line::text_width(label) + Line::text_width(query);
+        snapshot.cursor = typing.then(|| Cursor {
+            x: u16::try_from(cursor.min(cols.saturating_sub(1))).unwrap_or(0),
+            y: 0,
+            shape: CursorShape::Bar,
+            blinking: false,
+        });
+    }
+}
+
+/// A palette entry.
+pub struct Command {
+    pub label: String,
+    /// Its key chord, if bound.
+    pub hint: String,
+    pub action: Action,
+}
+
+pub struct Palette {
+    query: Field,
+    commands: Vec<Command>,
+    /// Indexes into `commands` that match the query, best first.
+    shown: Vec<usize>,
+    selected: usize,
+}
+
+/// Where the palette goes in a pane.
+struct Frame {
+    x: usize,
+    y: usize,
+    width: usize,
+    /// Rows of commands.
+    items: usize,
+}
+
+impl Palette {
+    pub fn new(commands: Vec<Command>) -> Self {
+        let shown = (0..commands.len()).collect();
+        Self {
+            query: Field::default(),
+            commands,
+            shown,
+            selected: 0,
+        }
+    }
+
+    pub fn key(&mut self, input: &KeyInput, rows: u16) -> Outcome {
+        if input.action == KeyAction::Release {
+            return Outcome::Nothing;
+        }
+        let page = frame(80, rows).items.max(1) as isize;
+        let shift = input.mods.contains(Mods::SHIFT);
+        match input.key {
+            Key::Escape => Outcome::Close,
+            Key::Enter => self.chosen().map_or(Outcome::Close, Outcome::Run),
+            Key::ArrowUp => self.move_by(-1),
+            Key::ArrowDown => self.move_by(1),
+            Key::Tab => self.move_by(if shift { -1 } else { 1 }),
+            Key::PageUp => self.move_by(-page),
+            Key::PageDown => self.move_by(page),
+            _ => {
+                let outcome = edited(self.query.edit(input));
+                if outcome == Outcome::Edited {
+                    self.filter();
+                }
+                outcome
+            }
+        }
+    }
+
+    pub fn paste(&mut self, text: &str) -> Outcome {
+        let outcome = edited(Some(self.query.paste(text)));
+        self.filter();
+        outcome
+    }
+
+    fn chosen(&self) -> Option<Action> {
+        let i = *self.shown.get(self.selected)?;
+        self.commands.get(i).map(|c| c.action.clone())
+    }
+
+    fn move_by(&mut self, n: isize) -> Outcome {
+        let len = self.shown.len();
+        if len == 0 {
+            return Outcome::Nothing;
+        }
+        let at = (self.selected as isize + n).clamp(0, len as isize - 1);
+        self.selected = at as usize;
+        Outcome::Moved
+    }
+
+    fn filter(&mut self) {
+        let query = self.query.0.as_str();
+        let mut scored: Vec<(i32, usize)> = self
+            .commands
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| Some((score(&c.label, query)?, i)))
+            .collect();
+        // Stable: ties keep the list's order.
+        scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+        self.shown = scored.into_iter().map(|(_, i)| i).collect();
+        self.selected = 0;
+    }
+
+    /// The command under pane cell `(col, row)`, `None` outside the box,
+    /// and `Some(None)` on its query row.
+    pub fn at(&self, (cols, rows): (u16, u16), col: u16, row: u16) -> Option<Option<Action>> {
+        let f = frame(cols, rows);
+        let (col, row) = (usize::from(col), usize::from(row));
+        if !(f.x..f.x + f.width).contains(&col) || !(f.y..=f.y + f.items).contains(&row) {
+            return None;
+        }
+        if row == f.y {
+            return Some(None);
+        }
+        let first = self.scroll(f.items);
+        let i = *self.shown.get(first + row - f.y - 1)?;
+        Some(self.commands.get(i).map(|c| c.action.clone()))
+    }
+
+    /// The first shown command that's in view: the selection stays on
+    /// screen.
+    fn scroll(&self, items: usize) -> usize {
+        (self.selected + 1).saturating_sub(items)
+    }
+
+    /// Draw the palette over the top of `snapshot`, with the cursor in its
+    /// query when `typing`.
+    pub fn draw(&self, snapshot: &mut Snapshot, colors: Colors, typing: bool) {
+        let f = frame(snapshot.cols, snapshot.rows);
+        if f.width == 0 {
+            return;
+        }
+        let prompt = " > ";
+        let mut rows = Vec::new();
+        let mut input = Line::default();
+        input.push_text(prompt, Line::text_width(prompt), colors.cell(false, true));
+        let field = f.width.saturating_sub(Line::text_width(prompt));
+        let query = tail(&self.query.0, field.saturating_sub(1));
+        input.push_text(query, field, colors.cell(false, false));
+        rows.push(input);
+        let first = self.scroll(f.items);
+        for (n, &i) in self.shown.iter().enumerate().skip(first).take(f.items) {
+            let Some(command) = self.commands.get(i) else {
+                continue;
+            };
+            let active = n == self.selected;
+            let hint_w = Line::text_width(&command.hint).min(f.width / 2);
+            let label_w = f.width.saturating_sub(hint_w + 3);
+            let mut line = Line::default();
+            line.push_text(" ", 1, colors.cell(active, false));
+            line.push_text(&command.label, label_w, colors.cell(active, false));
+            line.push_text(" ", 1, colors.cell(active, false));
+            line.push_text(&command.hint, hint_w, colors.cell(active, true));
+            line.push_text(" ", 1, colors.cell(active, false));
+            rows.push(line);
+        }
+        if self.shown.is_empty() {
+            let none = "  no matching commands";
+            rows.push(Line::from_text(none, f.width, colors.cell(false, true)));
+        }
+        for (row, line) in rows.iter().enumerate() {
+            if let Some(under) = snapshot.lines.get_mut(f.y + row) {
+                *under = Arc::new(under.with_overlay(f.x, line));
+            }
+        }
+        let x = f.x + Line::text_width(prompt) + Line::text_width(query);
+        snapshot.cursor = typing.then(|| Cursor {
+            x: u16::try_from(x).unwrap_or(0),
+            y: u16::try_from(f.y).unwrap_or(0),
+            shape: CursorShape::Bar,
+            blinking: false,
+        });
+    }
+}
+
+fn frame(cols: u16, rows: u16) -> Frame {
+    let (cols, rows) = (usize::from(cols), usize::from(rows));
+    let width = PALETTE_WIDTH.min(cols.saturating_sub(4)).max(cols.min(20));
+    let y = usize::from(rows > 6);
+    Frame {
+        x: (cols - width) / 2,
+        y,
+        width,
+        items: PALETTE_ROWS.min(rows.saturating_sub(y + 2)),
+    }
+}
+
+fn edited(changed: Option<bool>) -> Outcome {
+    match changed {
+        Some(true) => Outcome::Edited,
+        Some(false) => Outcome::Moved,
+        None => Outcome::Nothing,
+    }
+}
+
+/// The end of `text` that fits `cells`.
+fn tail(text: &str, cells: usize) -> &str {
+    let mut start = text.len();
+    let mut used = 0;
+    for (i, c) in text.char_indices().rev() {
+        used += Line::text_width(c.encode_utf8(&mut [0; 4]));
+        if used > cells {
+            break;
+        }
+        start = i;
+    }
+    text.get(start..).unwrap_or_default()
+}
+
+/// How well `query` fuzzy-matches `label` (its chars in order, any case),
+/// higher being better: runs and word starts count most. `None` for no
+/// match.
+fn score(label: &str, query: &str) -> Option<i32> {
+    let mut want = query
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .peekable();
+    let (mut score, mut run, mut prev) = (0, false, None::<char>);
+    for c in label.chars() {
+        let Some(&next) = want.peek() else {
+            break;
+        };
+        let start = prev.is_none_or(|p| !p.is_alphanumeric());
+        if c.to_lowercase().eq(std::iter::once(next)) {
+            want.next();
+            score += 1 + if run { 4 } else { 0 } + if start { 6 } else { 0 };
+            run = true;
+        } else {
+            run = false;
+        }
+        prev = Some(c);
+    }
+    want.peek().is_none().then_some(score)
+}
+
+/// Color the search matches in view.
+pub fn mark_matches(snapshot: &mut Snapshot) {
+    let Some(matches) = snapshot.search.take() else {
+        return;
+    };
+    for found in &matches.visible {
+        let Some(line) = snapshot.lines.get_mut(usize::from(found.row)) else {
+            continue;
+        };
+        let mut marked = (**line).clone();
+        let range = usize::from(found.cols.start)..usize::from(found.cols.end);
+        for cell in marked.cells.get_mut(range).unwrap_or_default() {
+            cell.bg = Some(if found.current { CURRENT_BG } else { MATCH_BG });
+            cell.fg = Some(MATCH_FG);
+            cell.flags.set(CellFlags::INVERSE, false);
+            cell.flags.set(CellFlags::SELECTED, false);
+            cell.flags.set(CellFlags::FAINT, false);
+        }
+        *line = Arc::new(marked);
+    }
+    snapshot.search = Some(matches);
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::overlay::{score, tail};
+
+    #[test]
+    fn fuzzy_prefers_word_starts_and_runs() {
+        assert!(score("Split right", "spr").is_some());
+        assert_eq!(score("Split right", "xyz"), None);
+        assert!(score("New tab", "nt") > score("Reset font", "nt"));
+        assert!(score("Reset font", "nt").is_some());
+        assert_eq!(score("anything", ""), Some(0));
+    }
+
+    #[test]
+    fn long_queries_show_their_end() {
+        assert_eq!(tail("hello world", 5), "world");
+        assert_eq!(tail("hi", 5), "hi");
+    }
+}

@@ -1,0 +1,16 @@
+[package]
+name = "jet-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+jet-pty.workspace = true
+libghostty-vt.workspace = true
+png.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
+
+[lints]
+workspace = true

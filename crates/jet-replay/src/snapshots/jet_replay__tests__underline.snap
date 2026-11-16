@@ -1,0 +1,9 @@
+---
+source: crates/jet-replay/src/main.rs
+expression: vt.plain_text()?
+---
+single: underline  double: double
+curly: undercurl spans cells and red curl
+dotted: dotted line  dashed: dashed line
+palette: orange via 58;5  faint: faint curl
+wide: 中文  strike: struck

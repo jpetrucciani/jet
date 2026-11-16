@@ -1,0 +1,5 @@
+single: [4munderline[0m  double: [21mdouble[0m
+curly: [4:3mundercurl spans cells[0m and [4:3;58:2::255:80:80mred curl[0m
+dotted: [4:4mdotted line[0m  dashed: [4:5mdashed line[0m
+palette: [4:3;58:5:214morange via 58;5[0m  faint: [2;4:3mfaint curl[0m
+wide: [4:3m中文[0m  strike: [9mstruck[0m

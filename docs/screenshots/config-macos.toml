@@ -1,0 +1,37 @@
+# docs/screenshots on macOS: see demo.sh.
+
+[font]
+size = 13.0
+
+[window]
+columns = 132
+rows = 34
+padding = 8
+decorations = "custom"
+
+[tab-bar]
+show = "always"
+
+[colors]
+foreground = "#c8ccd8"
+background = "#161922"
+cursor = "#7fdbca"
+palette = { 0 = "#20242f", 1 = "#e06c8b", 2 = "#7fd6a4", 3 = "#e8c27a", 4 = "#6fa8f0", 5 = "#c49af0", 6 = "#6fd3d8", 7 = "#c8ccd8", 8 = "#4a5165", 9 = "#f08aa4", 10 = "#9ce6bb", 11 = "#f2d49a", 12 = "#93bdf5", 13 = "#d6b4f5", 14 = "#93e0e4", 15 = "#eef0f6" }
+
+[status]
+position = "titlebar"
+
+[[status.segments]]
+text = "⎇ {var.branch}"
+
+[[status.segments]]
+text = "⎈ {var.k8s}"
+
+[[status.segments]]
+text = "{time}"
+
+[ghostty]
+config-file = false
+
+[shell]
+command = ["/bin/bash", "-c", "exec /bin/bash \"$JET_DEMO\" main"]

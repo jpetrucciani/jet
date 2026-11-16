@@ -1,0 +1,9 @@
+---
+source: crates/jet-replay/src/main.rs
+expression: vt.plain_text()?
+---
+emoji: 😀 🚀 🍕 🎉 ✨ end
+faint: 😀 🚀 end
+on blue: 🌈 🐍  end
+family: 👨‍👩‍👧 flag: 🇺🇸 end
+selector: ❤️ text: ❤ keycap: 1️⃣ bolt: ⚡ end
