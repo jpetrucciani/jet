@@ -31,10 +31,10 @@ main)
   var k8s "prod-east"
   var branch "main"
   # Another tab, then this one again, then the splits.
-  "$cli" spawn -- "$bash_" "$JET_DEMO" notes > /dev/null
+  "$cli" spawn -- "$bash_" "$JET_DEMO" notes >/dev/null
   "$cli" activate --pane "$JET_PANE"
   right=$("$cli" split --direction right --ratio 0.42 -- "$bash_" "$JET_DEMO" colors)
-  "$cli" split --pane "$right" --direction down --ratio 0.45 -- "$bash_" "$JET_DEMO" tests > /dev/null
+  "$cli" split --pane "$right" --direction down --ratio 0.45 -- "$bash_" "$JET_DEMO" tests >/dev/null
   "$cli" activate --pane "$JET_PANE"
   osc "133;A"
   prompt "cargo build --release"

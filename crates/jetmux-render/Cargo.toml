@@ -1,0 +1,15 @@
+[package]
+name = "jetmux-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+jetmux-proto = { version = "0.1.0", path = "../jetmux-proto" }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+jetmux-core = { path = "../jetmux-core" }

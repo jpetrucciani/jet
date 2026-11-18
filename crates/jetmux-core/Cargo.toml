@@ -1,0 +1,17 @@
+[package]
+name = "jetmux-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+jet-core.workspace = true
+jetmux-proto = { version = "0.1.0", path = "../jetmux-proto" }
+serde = { version = "1.0.229", features = ["derive"] }
+regex = { version = "1.13.1", default-features = false, features = ["std", "unicode-perl", "unicode-case"] }
+rustix = { version = "1.1.6", features = ["pty", "termios", "process", "fs", "event", "system"] }
+thiserror = "2.0.21"
+
+[lints]
+workspace = true

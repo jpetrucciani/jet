@@ -6,6 +6,7 @@
 //! and the timers it asked for (as `WaitUntil` deadlines).
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::process::{ExitCode, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -26,7 +27,9 @@ use winit::window::{
     CursorIcon, ImePurpose, ResizeDirection, UserAttentionType, Window, WindowAttributes, WindowId,
 };
 
-use crate::app::{App, BoxError, ConfigFile, Host, Kind, Pointer, Timer, Wake, WindowRequest};
+use crate::app::{
+    App, BoxError, ConfigFile, First, Host, Kind, Pointer, Start, Timer, Wake, WindowRequest,
+};
 use crate::chrome::Button;
 use crate::layout::Rect;
 
@@ -40,11 +43,11 @@ const BLINK: Duration = Duration::from_millis(600);
 
 /// A terminal window, or with `quake` the one that shows and hides (see
 /// [`quake`]).
-pub fn run(quake: bool) -> ExitCode {
+pub fn run(quake: bool, first: First) -> ExitCode {
     if quake && quake::signal_running() {
         return ExitCode::SUCCESS;
     }
-    match run_loop(quake) {
+    match run_loop(quake, first) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("jet: {err}");
@@ -53,8 +56,9 @@ pub fn run(quake: bool) -> ExitCode {
     }
 }
 
-fn run_loop(quake: bool) -> Result<(), BoxError> {
+fn run_loop(quake: bool, first: First) -> Result<(), BoxError> {
     let settings = ConfigFile::load();
+    let start = Start::new(&settings.config, quake, first);
     let mut builder = EventLoop::<Wake>::with_user_event();
     #[cfg(target_os = "linux")]
     let quake = quake && {
@@ -77,6 +81,7 @@ fn run_loop(quake: bool) -> Result<(), BoxError> {
     let mut handler = Handler {
         proxy: event_loop.create_proxy(),
         settings: Some(settings),
+        start: Some(start),
         quake,
         app: None,
         error: None,
@@ -241,6 +246,16 @@ impl Host for Winit {
         self.window.set_decorations(system_frame(decorations));
     }
 
+    /// macOS: the default text editor, as `.toml` may have no app.
+    fn open_file(&mut self, path: &Path) {
+        let path = path.to_string_lossy();
+        if cfg!(target_os = "macos") {
+            run_detached("open", &["-t", &path]);
+        } else {
+            run_detached("xdg-open", &[&path]);
+        }
+    }
+
     fn open_url(&mut self, url: &str) {
         let opener = if cfg!(target_os = "macos") {
             "open"
@@ -280,6 +295,8 @@ struct Handler {
     proxy: EventLoopProxy<Wake>,
     /// Loaded before the loop, for the window to take.
     settings: Option<ConfigFile>,
+    /// Readied before the loop for the window to take.
+    start: Option<Start>,
     quake: bool,
     app: Option<App<Winit>>,
     /// Why the window couldn't open, for `run` to report.
@@ -339,7 +356,15 @@ impl Handler {
         };
         let dpi = dpi_of(window.scale_factor());
         let focused = window.has_focus();
-        let mut app = App::new(host, &instance, surface, dpi, focused, settings)?;
+        let mut app = App::new(
+            host,
+            &instance,
+            surface,
+            dpi,
+            focused,
+            settings,
+            self.start.take().unwrap_or_default(),
+        )?;
         if quake {
             #[cfg(target_os = "macos")]
             quake::mac::join_all_spaces(&window);
@@ -411,7 +436,11 @@ impl ApplicationHandler<Wake> for Handler {
             return;
         };
         match event {
-            WindowEvent::CloseRequested => app.host.closing = true,
+            WindowEvent::CloseRequested => {
+                if app.close_requested() {
+                    app.host.closing = true;
+                }
+            }
             WindowEvent::Resized(size) => {
                 if size.width > 0 && size.height > 0 {
                     app.resize(size.width, size.height);
@@ -624,6 +653,7 @@ impl App<Winit> {
             (None, Pointer::Arrow) => CursorIcon::Default,
             (None, Pointer::Text) => CursorIcon::Text,
             (None, Pointer::Link) => CursorIcon::Pointer,
+            (None, Pointer::Shape(shape)) => shape.name().parse().unwrap_or_default(),
         };
         self.host.window.set_cursor(icon);
     }
@@ -676,7 +706,11 @@ impl App<Winit> {
         match button {
             Button::Minimize => window.set_minimized(true),
             Button::Maximize => window.set_maximized(!window.is_maximized()),
-            Button::Close => self.host.closing = true,
+            Button::Close => {
+                if self.close_requested() {
+                    self.host.closing = true;
+                }
+            }
         }
     }
 

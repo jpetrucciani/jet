@@ -66,6 +66,24 @@ jobs:
           path: target/dist/*.tar.gz
           if-no-files-found: error
 
+  # jetmux runs on servers: static musl binaries for any x86_64 Linux.
+  jetmux:
+    needs: detect
+    if: needs.detect.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-jetmux
+      - run: nix-shell --run dist_jetmux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jetmux
+          path: target/dist/jetmux-*.tar.gz
+          if-no-files-found: error
+
   # A PGO profile only fits the target it was recorded on, so Windows's is
   # recorded on Windows: an instrumented build from Linux runs there, and
   # the release build uses what it recorded.
@@ -79,7 +97,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-windows-pgo
-          workspaces: ". -> target/pgo/win-build"
+          workspaces: '. -> target/pgo/win-build'
       - uses: actions/cache@v4
         with:
           path: ~/.cache/cargo-xwin
@@ -107,9 +125,16 @@ jobs:
           path: bundle/raw/*.profraw
           if-no-files-found: error
 
+  # Signed through Azure Trusted Signing when the repo has its variables
+  # (JET_SIGN_ENDPOINT, JET_SIGN_ACCOUNT, JET_SIGN_PROFILE, and AZURE_CLIENT_ID,
+  # AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID for a federated login); unsigned
+  # otherwise.
   windows:
     needs: windows-pgo-run
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: cachix/install-nix-action@v31
@@ -125,11 +150,35 @@ jobs:
         with:
           name: windows-pgo-raw
           path: target/pgo/win-raw
-      - run: nix-shell --run dist_win
+      - if: vars.JET_SIGN_ACCOUNT != ''
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - if: vars.JET_SIGN_ACCOUNT != ''
+        run: |
+          token=$(az account get-access-token --resource https://codesigning.azure.net --query accessToken -o tsv)
+          echo "::add-mask::$token"
+          echo "JET_SIGN_TOKEN=$token" >>"$GITHUB_ENV"
+      - run: nix-shell --run 'dist_win && win_manifests'
+        env:
+          JET_SIGN_ENDPOINT: ${{ vars.JET_SIGN_ENDPOINT }}
+          JET_SIGN_ACCOUNT: ${{ vars.JET_SIGN_ACCOUNT }}
+          JET_SIGN_PROFILE: ${{ vars.JET_SIGN_PROFILE }}
       - uses: actions/upload-artifact@v4
         with:
           name: windows
-          path: target/dist/*.zip
+          path: |
+            target/dist/*.zip
+            target/dist/*.msi
+            target/dist/jet.json
+          if-no-files-found: error
+      # Not a release asset: the files for a microsoft/winget-pkgs PR.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: winget-manifests
+          path: target/winget
           if-no-files-found: error
 
   macos:
@@ -153,7 +202,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [detect, linux, windows, macos]
+    needs: [detect, linux, jetmux, windows, macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -161,6 +210,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: '{linux,jetmux,windows,macos}'
           merge-multiple: true
       # gh creates the tag at this commit along with the release.
       - env:

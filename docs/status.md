@@ -8,11 +8,11 @@ In `config.toml` (`~/.jet/config.toml`, else `%APPDATA%\jet\config.toml` on Wind
 
 ```toml
 [window]
-decorations = "custom"      # needed for position = "titlebar"
+decorations = "custom" # needed for position = "titlebar"
 
 [status]
-position = "titlebar"       # titlebar | tab-bar | top | bottom
-style = "powerline"         # powerline | round | plain
+position = "titlebar" # titlebar | tab-bar | top | bottom
+style = "powerline" # powerline | round | plain
 
 [[status.segments]]
 text = "{user}@{host}"
@@ -41,30 +41,31 @@ text = "{time}"
 
 ### Where it goes
 
-| `position` | Where |
-| --- | --- |
-| `titlebar` | Right of the tabs, beside minimize/maximize/close. Needs `decorations = "custom"`; otherwise it falls back to `bottom` |
-| `tab-bar` | The end of the tab bar: its right end, or the foot of a side (left/right) tab bar with one segment per row. Keeps the tab bar shown even with one tab |
-| `top`, `bottom` | A row of its own above or below the panes. `align = "left"` on a segment puts it at the left end; segments default to the right |
+| `position`      | Where                                                                                                                                                 |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `titlebar`      | Right of the tabs, beside minimize/maximize/close. Needs `decorations = "custom"`; otherwise it falls back to `bottom`                                |
+| `tab-bar`       | The end of the tab bar: its right end, or the foot of a side (left/right) tab bar with one segment per row. Keeps the tab bar shown even with one tab |
+| `top`, `bottom` | A row of its own above or below the panes. `align = "left"` on a segment puts it at the left end; segments default to the right                       |
 
 `style`: `powerline` (arrows), `round` (pills), `plain` (blocks). jet draws the separators itself, so no Nerd Font is needed.
 
 ## Fields
 
-| Field | Value |
-| --- | --- |
-| `{title}` | The title the shell or program set (OSC 0/2) |
-| `{cwd}` | Where the shell is, as it reported it (OSC 7 or OSC 9;9), remote paths included; else the directory of the program in front (not while that's `ssh`) |
-| `{dir}` | The last part of `{cwd}` |
-| `{host}` | The host the shell reported in OSC 7, else the `ssh` destination, else this computer |
-| `{user}` | The `ssh` login user, else you |
-| `{ssh}` | `user@host` of an `ssh` running in the pane; empty otherwise |
-| `{process}` | The program in front (`ssh`, `nvim`, `cargo`), without `.exe` |
-| `{profile}` | The pane's profile name; `default` for the plain shell |
-| `{tab}`, `{tabs}` | The tab's number and how many there are |
-| `{time}`, `{date}` | Local `HH:MM` and `YYYY-MM-DD` |
-| `{progress}` | `42%` (or `…`) while a program reports progress (OSC 9;4: winget, cargo, PowerShell) |
-| `{var.NAME}` | A user variable your shell or a script set; see below |
+| Field              | Value                                                                                                                                                |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `{title}`          | The title the shell or program set (OSC 0/2)                                                                                                         |
+| `{cwd}`            | Where the shell is, as it reported it (OSC 7 or OSC 9;9), remote paths included; else the directory of the program in front (not while that's `ssh`) |
+| `{dir}`            | The last part of `{cwd}`                                                                                                                             |
+| `{host}`           | The host from the innermost OSC 3008 context or the shell's OSC 7, else the `ssh` destination, else this computer                                    |
+| `{user}`           | Who the innermost OSC 3008 context runs as, else the `ssh` login user, else you                                                                      |
+| `{context}`        | What the innermost OSC 3008 context changed: `root` under `run0`/`sudo`, the container or VM name, the remote host; empty otherwise                  |
+| `{ssh}`            | `user@host` of an `ssh` running in the pane; empty otherwise                                                                                         |
+| `{process}`        | The program in front (`ssh`, `nvim`, `cargo`), without `.exe`                                                                                        |
+| `{profile}`        | The pane's profile name; `default` for the plain shell                                                                                               |
+| `{tab}`, `{tabs}`  | The tab's number and how many there are                                                                                                              |
+| `{time}`, `{date}` | Local `HH:MM` and `YYYY-MM-DD`                                                                                                                       |
+| `{progress}`       | `42%` (or `…`) while a program reports progress (OSC 9;4: winget, cargo, PowerShell)                                                                 |
+| `{var.NAME}`       | A user variable your shell or a script set; see below                                                                                                |
 
 - **Program in front:** `{process}`, `{ssh}`, and the fallbacks for `{cwd}`, `{host}` and `{user}` come from looking at the focused pane's newest process once a second. That's how `ssh me@box` shows up with nothing installed on the box. On Windows that's the newest process under the shell; on Linux, the terminal's foreground job.
 - **Values are per pane:** each split keeps its own title, directory and variables, and the status follows the focus.
@@ -125,7 +126,7 @@ text = "🐍 {var.venv}"
 text = "⎈ {var.k8s}"
 
 [[status.segments]]
-text = "✘ {var.rc}"          # only after a failed command
+text = "✘ {var.rc}" # only after a failed command
 background = "#d0679d"
 ```
 

@@ -63,6 +63,14 @@ mod tests {
     use crate::icon::{bitmap, render};
 
     #[test]
+    fn the_jetmux_icon_draws() -> Result<(), String> {
+        let icon = render(crate::app::JETMUX_ICON.as_bytes(), 16)?;
+        assert_eq!((icon.width, icon.height), (16, 16));
+        assert!(icon.rgba.chunks(4).any(|p| p[3] > 0));
+        Ok(())
+    }
+
+    #[test]
     fn svgs_fit_the_square() -> Result<(), String> {
         let wide = br##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20">
             <rect width="40" height="20" fill="#ff0000"/></svg>"##;

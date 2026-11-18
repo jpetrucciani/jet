@@ -69,7 +69,16 @@ struct Row {
 struct RowKey {
     metrics: CellMetrics,
     colors: Colors,
+    selection: Selection,
     origin: [u32; 2],
+}
+
+/// How selected cells are drawn: unset colors tint the cell's background
+/// and keep its text color.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Selection {
+    pub background: Option<Rgb>,
+    pub foreground: Option<Rgb>,
 }
 
 /// Instances for one frame. Public only so `jet-replay --bench` can time
@@ -85,6 +94,7 @@ pub struct Frame {
     shaped: Vec<ShapedGlyph>,
     /// Per-cell colors of the row being built.
     colors: Vec<CellColors>,
+    pub selection: Selection,
 }
 
 /// Final colors of one cell after inverse, selection and a block cursor.
@@ -133,6 +143,7 @@ struct RowCtx<'a> {
     left: f32,
     m: CellMetrics,
     block_cursor: Option<usize>,
+    selection: Selection,
 }
 
 impl Frame {
@@ -165,6 +176,7 @@ impl Frame {
         let key = RowKey {
             metrics: m,
             colors: snap.colors,
+            selection: self.selection,
             origin,
         };
         if self.key != Some(key) {
@@ -195,6 +207,7 @@ impl Frame {
                     left: origin[0] as f32,
                     m,
                     block_cursor,
+                    selection: self.selection,
                 };
                 self.build_row(&ctx, fonts, &mut instances);
                 if let Some(row) = self.rows.get_mut(y) {
@@ -238,7 +251,11 @@ impl Frame {
             let mut bg = bg.map(|c| rgba(c, 1.0));
             if cell.flags.contains(CellFlags::SELECTED) {
                 let under = bg.unwrap_or_else(|| rgba(snap.colors.background, 1.0));
-                bg = Some(mix(under, SELECTION, SELECTION_ALPHA));
+                bg = Some(match ctx.selection.background {
+                    Some(c) => rgba(c, 1.0),
+                    None => mix(under, SELECTION, SELECTION_ALPHA),
+                });
+                fg = ctx.selection.foreground.unwrap_or(fg);
             }
             CellColors {
                 fg: rgba(fg, alpha),

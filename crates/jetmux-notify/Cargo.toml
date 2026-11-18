@@ -1,0 +1,27 @@
+[package]
+name = "jetmux-notify"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+aes-gcm = "0.11.1"
+jetmux-client = { version = "0.1.0", path = "../jetmux-client" }
+jet-config.workspace = true
+jetmux-proto = { version = "0.1.0", path = "../jetmux-proto" }
+hkdf = "0.13.0"
+http-body-util = "0.1.5"
+hyper = { version = "1.12.0", features = ["client", "http1"] }
+hyper-rustls = { version = "0.27.10", default-features = false, features = ["http1", "tls12", "ring", "webpki-roots"] }
+hyper-util = { version = "0.1.21", features = ["client-legacy", "http1", "tokio"] }
+p256 = { version = "0.14.0", features = ["ecdsa", "ecdh"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt", "macros", "net", "time"] }
+toml = "1.2.1"
+
+[lints]
+workspace = true

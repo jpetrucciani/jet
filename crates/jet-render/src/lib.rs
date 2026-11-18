@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use wgpu::util::DeviceExt;
 
 use crate::frame::GlyphInstance;
-pub use crate::frame::{Frame, Quad};
+pub use crate::frame::{Frame, Quad, Selection};
 
 #[derive(Debug)]
 pub enum Error {
@@ -96,6 +96,9 @@ impl Gpu {
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("jet"),
             required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
+            // jet's buffers and atlases total a few MB; the default hint
+            // reserves 128 MB device and 64 MB upload blocks for them.
+            memory_hints: wgpu::MemoryHints::MemoryUsage,
             ..Default::default()
         }))
         .map_err(|err| Error::Device(err.to_string()))?;
@@ -250,6 +253,7 @@ pub struct Renderer {
     flash: Option<[f32; 4]>,
     /// Of default backgrounds, for a target that composites with alpha.
     opacity: f32,
+    selection: Selection,
     /// Where each added image sits in the color atlas, in UV units.
     images: Vec<([f32; 2], [f32; 2])>,
 }
@@ -479,6 +483,7 @@ impl Renderer {
             padding,
             flash: None,
             opacity: 1.0,
+            selection: Selection::default(),
             images: Vec::new(),
         }
     }
@@ -542,6 +547,10 @@ impl Renderer {
         self.opacity = opacity.clamp(0.0, 1.0);
     }
 
+    pub fn set_selection(&mut self, selection: Selection) {
+        self.selection = selection;
+    }
+
     pub fn set_flash(&mut self, color: Option<[f32; 4]>) {
         self.flash = color;
     }
@@ -581,6 +590,7 @@ impl Renderer {
             .retain(|id, _| grids.iter().any(|g| g.id == *id));
         for grid in grids {
             let frame = self.frames.entry(grid.id).or_default();
+            frame.selection = self.selection;
             frame.build(grid.snapshot, &mut self.fonts, grid.origin);
         }
         upload_atlas(&self.queue, &self.atlas, self.fonts.atlas_mut());

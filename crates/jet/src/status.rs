@@ -2,165 +2,63 @@
 //! session, and how a row or column of them is laid out in cells. Plain
 //! data, so it tests on any platform.
 
-use std::collections::HashMap;
+use jet_config::status::{Align, Shown, StatusStyle};
+use jet_core::{Cell, Line, Rgb, ssh_destination};
 
-use jet_config::status::{Align, Field, Segment, StatusStyle};
-use jet_core::{Cell, Line, Location, Progress, Rgb};
-
-/// Who and where an `ssh` in front is connected to.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Ssh {
-    pub user: Option<String>,
-    pub host: String,
+/// `argv`, an `ssh` command line, run again on the same host (a remote
+/// command it had is dropped): `command` there, else a login shell; in
+/// `dir` if given.
+pub fn ssh_again(argv: &[String], dir: Option<&str>, command: Option<&str>) -> Option<Vec<String>> {
+    let (at, _) = ssh_destination(argv)?;
+    let mut again = argv.get(..at)?.to_vec();
+    // A terminal for the remote shell, even with a command.
+    again.push("-t".into());
+    again.push(argv.get(at)?.clone());
+    let cd = dir.map(|dir| format!("cd -- {} 2>/dev/null; ", sh_quote(dir)));
+    let run = command.map(|c| format!("-lc {}", sh_quote(c)));
+    if cd.is_some() || run.is_some() {
+        again.push(format!(
+            "{}exec \"${{SHELL:-sh}}\" {}",
+            cd.unwrap_or_default(),
+            run.as_deref().unwrap_or("-l")
+        ));
+    }
+    Some(again)
 }
 
-/// The destination of an `ssh` command line, if it's one: `ssh -p 22
-/// me@box`, `ssh.exe -l me box`, `"C:\...\ssh.exe" box ls`.
-pub fn ssh_target(argv: &[String]) -> Option<Ssh> {
+/// `text` as one POSIX shell word.
+pub fn sh_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', r"'\''"))
+}
+
+/// `argv`, a `wsl.exe` command line, run again for a shell in the same
+/// distro as the same user (a command it ran is dropped), in the Linux
+/// directory `dir` if given.
+pub fn wsl_again(argv: &[String], dir: Option<&str>) -> Option<Vec<String>> {
     let (program, args) = argv.split_first()?;
     let name = program.rsplit(['/', '\\']).next()?.to_ascii_lowercase();
-    if name != "ssh" && name != "ssh.exe" {
+    if name != "wsl" && name != "wsl.exe" {
         return None;
     }
-    /// Options that take a value, from ssh(1).
-    const VALUED: &str = "BbcDEeFIiJLlmOoPpQRSWw";
-    let mut user = None;
+    let mut again = vec![program.clone()];
     let mut args = args.iter();
     while let Some(arg) = args.next() {
-        let Some(flags) = arg.strip_prefix('-') else {
-            let (u, host) = match arg.rsplit_once('@') {
-                Some((u, host)) => (Some(u.to_owned()), host),
-                None => (user, arg.as_str()),
-            };
-            // ssh://user@host:port
-            let host = host.strip_prefix("ssh://").unwrap_or(host);
-            return Some(Ssh {
-                user: u,
-                host: host.to_owned(),
-            });
-        };
-        // Flags group (`-tt`); a valued one takes the rest or the next arg.
-        for (i, flag) in flags.char_indices() {
-            if VALUED.contains(flag) {
-                let rest = flags.get(i + 1..).unwrap_or_default();
-                let value = if rest.is_empty() {
-                    args.next().cloned()
-                } else {
-                    Some(rest.to_owned())
-                };
-                if flag == 'l' {
-                    user = value;
-                }
-                break;
+        match arg.as_str() {
+            "-d" | "--distribution" | "--distribution-id" | "-u" | "--user" | "--shell-type" => {
+                again.push(arg.clone());
+                again.push(args.next()?.clone());
             }
+            "--cd" => {
+                args.next();
+            }
+            // A command (`-e`, `--`, or bare words) from here on.
+            _ => break,
         }
     }
-    None
-}
-
-/// What the fields read, for one pane.
-#[derive(Debug, Default)]
-pub struct Session<'a> {
-    pub title: &'a str,
-    pub location: Option<&'a Location>,
-    pub ssh: Option<&'a Ssh>,
-    /// The program in front.
-    pub process: Option<&'a str>,
-    pub profile: Option<&'a str>,
-    pub tab: usize,
-    pub tabs: usize,
-    pub time: &'a str,
-    pub date: &'a str,
-    pub progress: Option<Progress>,
-    /// The last command's exit status, from OSC 133;D.
-    pub exit: Option<i32>,
-    pub vars: Option<&'a HashMap<String, String>>,
-    pub local_user: &'a str,
-    pub local_host: &'a str,
-}
-
-impl Session<'_> {
-    pub fn value(&self, field: &Field) -> Option<String> {
-        let owned = |s: &str| Some(s.to_owned());
-        match field {
-            Field::Title => owned(self.title),
-            Field::Cwd => self.location.map(|l| l.path.clone()),
-            Field::Dir => {
-                let path = &self.location?.path;
-                let trimmed = path.trim_end_matches(['/', '\\']);
-                let last = trimmed.rsplit(['/', '\\']).next().unwrap_or_default();
-                // A root is its own name.
-                owned(if last.is_empty() || last.ends_with(':') {
-                    path
-                } else {
-                    last
-                })
-            }
-            Field::Host => self
-                .location
-                .and_then(|l| l.host.clone())
-                .or_else(|| self.ssh.map(|s| s.host.clone()))
-                .or_else(|| owned(self.local_host)),
-            Field::User => self
-                .ssh
-                .and_then(|s| s.user.clone())
-                .or_else(|| owned(self.local_user)),
-            Field::Ssh => self.ssh.map(|s| match &s.user {
-                Some(user) => format!("{user}@{}", s.host),
-                None => s.host.clone(),
-            }),
-            Field::Process => self.process.map(|p| {
-                let lower = p.to_ascii_lowercase();
-                match lower.strip_suffix(".exe") {
-                    Some(_) => p.get(..p.len() - 4).unwrap_or(p).to_owned(),
-                    None => p.to_owned(),
-                }
-            }),
-            Field::Profile => owned(self.profile.unwrap_or("default")),
-            Field::Tab => Some(self.tab.to_string()),
-            Field::Tabs => Some(self.tabs.to_string()),
-            Field::Time => owned(self.time),
-            Field::Date => owned(self.date),
-            Field::Progress => match self.progress? {
-                Progress::Normal(p) | Progress::Error(p) | Progress::Paused(p) => {
-                    Some(format!("{p}%"))
-                }
-                Progress::Indeterminate => owned("…"),
-                Progress::Hidden => None,
-            },
-            Field::Exit => self.exit.filter(|&s| s != 0).map(|s| s.to_string()),
-            Field::Var(name) => self.vars?.get(name).cloned(),
-        }
+    if let Some(dir) = dir {
+        again.extend(["--cd".into(), dir.to_owned()]);
     }
-}
-
-/// A segment with something to say.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Shown {
-    pub text: String,
-    pub fg: Rgb,
-    pub bg: Rgb,
-    pub align: Align,
-}
-
-/// The segments whose fields all have values, colored: unset colors
-/// alternate between two steps from `bg` toward `fg`.
-pub fn shown(segments: &[Segment], session: &Session, fg: Rgb, bg: Rgb) -> Vec<Shown> {
-    let steps = [mix(bg, fg, 0.28), mix(bg, fg, 0.16)];
-    let mut out = Vec::new();
-    for segment in segments {
-        let Some(text) = segment.text.render(|f| session.value(f)) else {
-            continue;
-        };
-        let step = steps[out.len() % 2];
-        out.push(Shown {
-            text,
-            fg: segment.foreground.map_or(fg, |c| c.0),
-            bg: segment.background.map_or(step, |c| c.0),
-            align: segment.align,
-        });
-    }
-    out
+    Some(again)
 }
 
 /// Separators in front of and behind a segment, pointing outward from
@@ -262,68 +160,47 @@ pub fn column(shown: &[Shown], cols: usize) -> Vec<Line> {
     rows.collect()
 }
 
-pub fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
-    let f = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * t).round() as u8;
-    Rgb {
-        r: f(a.r, b.r),
-        g: f(a.g, b.g),
-        b: f(a.b, b.b),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use jet_config::Color;
-    use jet_config::status::{Align, Field, Segment, StatusStyle, Template};
-    use jet_core::{Location, Rgb};
+    use jet_config::status::{Align, Segment, Session, StatusStyle, Template, shown};
+    use jet_core::Rgb;
 
-    use crate::status::{Session, Ssh, column, row, row_width, shown, ssh_target};
+    use crate::status::{column, row, row_width, sh_quote, ssh_again, wsl_again};
 
     fn argv(line: &str) -> Vec<String> {
         line.split(' ').map(str::to_owned).collect()
     }
 
     #[test]
-    fn ssh_destinations() {
-        let ssh = |line: &str| ssh_target(&argv(line));
-        let me_box = Some(Ssh {
-            user: Some("me".into()),
-            host: "box".into(),
-        });
-        assert_eq!(ssh("ssh me@box"), me_box);
-        assert_eq!(ssh("ssh.exe -p 2222 -A me@box ls"), me_box);
-        assert_eq!(ssh("C:\\OpenSSH\\SSH.EXE -l me -tt box"), me_box);
-        assert_eq!(ssh("ssh -lme box"), me_box);
-        assert_eq!(ssh("ssh -i key box").map(|s| s.user), Some(None));
-        assert_eq!(ssh("sshd -D"), None);
-        assert_eq!(ssh("ssh -V"), None);
+    fn ssh_runs_again_into_a_directory() {
+        let again = |line: &str, dir| ssh_again(&argv(line), dir, None).map(|a| a.join(" "));
+        assert_eq!(
+            again("ssh -p 2222 -J hop me@box htop", None).as_deref(),
+            Some("ssh -p 2222 -J hop -t me@box")
+        );
+        assert_eq!(
+            again("ssh box", Some("/srv/it's")).as_deref(),
+            Some(r#"ssh -t box cd -- '/srv/it'\''s' 2>/dev/null; exec "${SHELL:-sh}" -l"#)
+        );
+        assert_eq!(again("ssh -V", None), None);
+        // A command runs in a login shell; matched text stays one word.
+        let view = ssh_again(&argv("ssh box"), None, Some(&sh_quote("a;b"))).map(|a| a.join(" "));
+        assert_eq!(
+            view.as_deref(),
+            Some(r#"ssh -t box exec "${SHELL:-sh}" -lc ''\''a;b'\'''"#)
+        );
     }
 
     #[test]
-    fn host_prefers_what_the_shell_reports() {
-        let location = Location {
-            host: Some("reported".into()),
-            path: "/home/me/src/".into(),
-        };
-        let ssh = Ssh {
-            user: None,
-            host: "box".into(),
-        };
-        let mut s = Session {
-            local_host: "desk",
-            local_user: "jo",
-            ..Session::default()
-        };
-        assert_eq!(s.value(&Field::Host).as_deref(), Some("desk"));
-        assert_eq!(s.value(&Field::Ssh), None);
-        s.ssh = Some(&ssh);
-        assert_eq!(s.value(&Field::Host).as_deref(), Some("box"));
-        assert_eq!(s.value(&Field::User).as_deref(), Some("jo"));
-        s.location = Some(&location);
-        assert_eq!(s.value(&Field::Host).as_deref(), Some("reported"));
-        assert_eq!(s.value(&Field::Dir).as_deref(), Some("src"));
-        s.process = Some("SSH.EXE");
-        assert_eq!(s.value(&Field::Process).as_deref(), Some("SSH"));
+    fn wsl_runs_again_into_a_directory() {
+        let again = |line: &str, dir| wsl_again(&argv(line), dir).map(|a| a.join(" "));
+        assert_eq!(
+            again("wsl.exe -d NixOS --cd /tmp -- htop", Some("/srv")).as_deref(),
+            Some("wsl.exe -d NixOS --cd /srv")
+        );
+        assert_eq!(again("wsl -u root", None).as_deref(), Some("wsl -u root"));
+        assert_eq!(again("ssh box", None), None);
     }
 
     #[test]

@@ -10,6 +10,7 @@
 
 mod ghostty;
 pub mod keybinds;
+pub mod plumb;
 pub mod status;
 
 use std::collections::BTreeMap;
@@ -43,9 +44,18 @@ pub struct Config {
     pub profiles: BTreeMap<String, Profile>,
     pub quake: Quake,
     pub status: Status,
+    /// `[plumb.editor]`: text that does something when Ctrl+clicked.
+    pub plumb: BTreeMap<String, plumb::Plumb>,
+    /// jetmux's settings, which jetmux reads (with its own file on top).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jetmux: Option<Table>,
     /// Consumed while layering; here so its presence validates.
     #[serde(skip_serializing)]
     ghostty: Option<Table>,
+    /// More jet configs layered on top of this one, in order: relative to
+    /// this file or `~/`. Missing ones are skipped (and watched).
+    #[serde(skip_serializing)]
+    include: Vec<String>,
 }
 
 /// `jet quake`: a window a global hotkey shows and hides.
@@ -66,6 +76,14 @@ pub struct Quake {
     pub always_on_top: bool,
     /// Show in the taskbar and Alt+Tab while visible.
     pub taskbar: bool,
+    /// Windows: place by the whole monitor, covering the taskbar, not its
+    /// work area.
+    pub over_taskbar: bool,
+    /// The profile its first tab opens; unset: `[shell]`'s.
+    pub profile: Option<String>,
+    /// Windows: keep `jet quake` running, started at sign-in and by any jet
+    /// window that finds it isn't.
+    pub autostart: bool,
 }
 
 impl Default for Quake {
@@ -86,6 +104,9 @@ impl Default for Quake {
             hide_on_blur: true,
             always_on_top: true,
             taskbar: false,
+            over_taskbar: false,
+            profile: None,
+            autostart: true,
         }
     }
 }
@@ -159,6 +180,19 @@ pub struct Window {
     pub decorations: Decorations,
     /// Show progress reports (OSC 9;4) on the taskbar button.
     pub taskbar_progress: bool,
+    /// Present without waiting for vblank, paced by the monitor during
+    /// floods: a keystroke shows ~3 ms sooner, and a frame may tear.
+    pub low_latency: bool,
+    /// Open the tabs, splits and directories the last window closed with.
+    pub restore: bool,
+    /// The profile a new window's first tab runs; unset: `[shell] profile`.
+    pub profile: Option<String>,
+    /// Ask before closing a tab, split or window with something running in
+    /// it besides the shell.
+    pub confirm_close: bool,
+    /// How much of themselves splits without the keyboard show: 1 doesn't
+    /// fade them.
+    pub unfocused_split_opacity: f32,
 }
 
 /// Who draws the title bar.
@@ -188,6 +222,11 @@ impl Default for Window {
             color_scheme: ColorScheme::Auto,
             decorations: Decorations::System,
             taskbar_progress: true,
+            low_latency: false,
+            restore: false,
+            profile: None,
+            confirm_close: true,
+            unfocused_split_opacity: 0.7,
         }
     }
 }
@@ -310,14 +349,36 @@ pub enum TabBarPosition {
     Right,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Shell {
     /// `"pwsh -NoLogo"`, or `["C:/Program Files/Git/bin/bash.exe", "-l"]`.
     /// Unset: the first of pwsh, Windows PowerShell and cmd that starts.
     pub command: Option<Command>,
     /// Shown before its tabs' titles.
     pub icon: Option<Icon>,
+    /// bash, zsh and PowerShell load jet's prompt marks and directory
+    /// reports on their own.
+    pub integration: bool,
+    /// A new tab or split from a pane running `ssh` runs it again (the
+    /// system's, with the same options), in the directory the remote shell
+    /// last reported. Likewise `wsl.exe`, with `--cd`.
+    pub follow_ssh: bool,
+    /// The profile new tabs and splits run when none is named; unset: the
+    /// command above.
+    pub profile: Option<String>,
+}
+
+impl Default for Shell {
+    fn default() -> Self {
+        Self {
+            command: None,
+            icon: None,
+            integration: true,
+            follow_ssh: false,
+            profile: None,
+        }
+    }
 }
 
 /// A tab's icon, from one string: an emoji or any text, an `.svg` file,
@@ -362,6 +423,40 @@ pub struct Profile {
     pub icon: Option<Icon>,
     /// Start here instead of where the focused shell is.
     pub cwd: Option<PathBuf>,
+    /// Show a jetmux session instead of running `command`: its tabs
+    /// become tabs here, its splits drawn as jet's.
+    pub jetmux: Option<Jetmux>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Jetmux {
+    /// Through `ssh -T host`; unset: this machine's daemon (not on
+    /// Windows).
+    pub host: Option<String>,
+    pub session: String,
+    /// The host's jetmux profile to start the session from when it isn't
+    /// running; unset: a plain shell.
+    pub up: Option<String>,
+    /// jetmux's path on the host, for when a non-interactive shell's PATH
+    /// lacks it; unset: found on PATH.
+    pub program: Option<String>,
+}
+
+impl Jetmux {
+    /// What runs `jetmux proxy` for this session.
+    pub fn command(&self) -> Vec<String> {
+        let program = self.program.clone().unwrap_or_else(|| "jetmux".into());
+        let mut argv: Vec<String> = match &self.host {
+            Some(host) => vec!["ssh".into(), "-T".into(), host.clone(), program],
+            None => vec![program],
+        };
+        argv.push("proxy".into());
+        if let Some(up) = &self.up {
+            argv.extend(["-s".into(), self.session.clone(), "--up".into(), up.clone()]);
+        }
+        argv
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -394,6 +489,22 @@ pub struct Terminal {
     /// Show programs' desktop notifications (OSC 9, OSC 777), unless they
     /// come from the pane you're looking at.
     pub notifications: bool,
+    /// Ask before pasting text with a newline into a program that would
+    /// run it (one without bracketed paste, like a plain shell prompt).
+    pub paste_protection: bool,
+    /// What the bell (`\a`) does; `[]` ignores it.
+    pub bell: Vec<Bell>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Bell {
+    /// Flash the window, when it's in front.
+    Flash,
+    /// Flash the taskbar button (bounce the Dock icon), when it isn't.
+    Attention,
+    /// The system's alert sound (Windows only).
+    Sound,
 }
 
 impl Default for Terminal {
@@ -403,6 +514,8 @@ impl Default for Terminal {
             copy_on_select: true,
             clipboard_write: true,
             notifications: true,
+            paste_protection: true,
+            bell: vec![Bell::Flash, Bell::Attention],
         }
     }
 }
@@ -432,11 +545,14 @@ pub enum CursorStyle {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Colors {
     pub foreground: Option<Color>,
     pub background: Option<Color>,
     pub cursor: Option<Color>,
+    /// Selected text's cells; unset tints them and keeps the text's color.
+    pub selection_background: Option<Color>,
+    pub selection_foreground: Option<Color>,
     /// `{ 0 = "#1d1f21", 8 = "#666666" }`: entries of the 256-color
     /// palette to replace.
     pub palette: BTreeMap<String, Color>,
@@ -496,6 +612,8 @@ pub struct Loaded {
     pub config: Config,
     pub warnings: Vec<String>,
     pub sources: Vec<PathBuf>,
+    /// Includes that weren't there: watched so creating one reloads.
+    pub absent: Vec<PathBuf>,
 }
 
 /// Where configs and themes live. From the environment in the app; tests
@@ -539,6 +657,41 @@ impl Dirs {
             platform,
             ghostty,
         }
+    }
+
+    /// The config file to edit: the one in use, else where a new one goes
+    /// ($JET_CONFIG, else the platform's directory).
+    pub fn main_path(&self) -> Option<PathBuf> {
+        let used = self.candidates().into_iter().find(|p| p.is_file());
+        let platform = self
+            .platform
+            .as_ref()
+            .map(|d| d.join("jet").join("config.toml"));
+        let home = self
+            .home
+            .as_ref()
+            .map(|h| h.join(".jet").join("config.toml"));
+        used.or_else(|| self.explicit.clone()).or(platform).or(home)
+    }
+
+    /// The built-in themes and those in themes/ directories, by name,
+    /// sorted without regard to case.
+    pub fn themes(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .theme_dirs()
+            .iter()
+            .filter_map(|d| std::fs::read_dir(d).ok())
+            .flatten()
+            .filter_map(|e| {
+                let file = e.ok()?;
+                file.file_type().ok()?.is_file().then_some(())?;
+                file.file_name().into_string().ok()
+            })
+            .chain(bundled_themes().map(|(name, _)| name.to_owned()))
+            .collect();
+        names.sort_by_key(|n| n.to_lowercase());
+        names.dedup();
+        names
     }
 
     /// jet config files, in the order they're tried.
@@ -597,10 +750,129 @@ pub fn stamps(paths: &[PathBuf]) -> Vec<Option<SystemTime>> {
 /// Load the first jet config found, with everything it layers in.
 pub fn load(dirs: &Dirs) -> Result<Loaded, Error> {
     let Some(path) = dirs.candidates().into_iter().find(|p| p.is_file()) else {
-        return resolve(None, dirs);
+        return resolve(None, None, dirs);
     };
     let text = read(&path)?;
-    resolve(Some((&path, &text)), dirs)
+    resolve(Some((&path, &text)), None, dirs)
+}
+
+/// [`load`] with theme `name` in place of the configured one, to preview.
+pub fn load_with_theme(dirs: &Dirs, name: &str) -> Result<Loaded, Error> {
+    let main = dirs.candidates().into_iter().find(|p| p.is_file());
+    let text = main.as_ref().map(|p| read(p)).transpose()?;
+    let mut theme = Table::new();
+    theme.insert("name".into(), Value::String(name.to_owned()));
+    let mut top = Table::new();
+    top.insert("theme".into(), Value::Table(theme));
+    let preview = Some((Path::new("theme preview"), top));
+    resolve(main.as_deref().zip(text.as_deref()), preview, dirs)
+}
+
+/// Config `text` with its `[theme] name` set to `name`, the rest as it was;
+/// `None` when that can't be done by line (an inline `theme = {...}`).
+pub fn with_theme(text: &str, name: &str) -> Option<String> {
+    let line = format!("name = {}", Value::String(name.to_owned()));
+    let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let key = |l: &str| {
+        l.split('=')
+            .next()
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let mut out: Vec<String> = Vec::new();
+    let (mut table, mut header, mut done) = (String::new(), None, false);
+    for l in text.lines() {
+        let t = l.trim();
+        if t.starts_with('[') {
+            table = t.trim_matches(|c| c == '[' || c == ']').trim().to_owned();
+            out.push(l.to_owned());
+            if t == "[theme]" {
+                header = Some(out.len());
+            }
+            continue;
+        }
+        let ours =
+            (table == "theme" && key(t) == "name") || (table.is_empty() && key(t) == "theme.name");
+        if ours && !done {
+            let prefix = if table.is_empty() { "theme." } else { "" };
+            out.push(format!("{prefix}{line}"));
+            done = true;
+        } else {
+            out.push(l.to_owned());
+        }
+    }
+    match (done, header) {
+        (true, _) => {}
+        (false, Some(at)) => out.insert(at, line),
+        (false, None) => {
+            if out.last().is_some_and(|l| !l.trim().is_empty()) {
+                out.push(String::new());
+            }
+            out.extend(["[theme]".to_owned(), line]);
+        }
+    }
+    let new = out.join(eol) + eol;
+    let table: Table = toml::from_str(&new).ok()?;
+    let set = table
+        .get("theme")
+        .and_then(|t| t.get("name"))
+        .and_then(Value::as_str);
+    (set == Some(name)).then_some(new)
+}
+
+/// What a new config file starts as: `docs/config.toml`, every key
+/// commented out so the defaults stay jet's.
+pub fn starter() -> String {
+    let doc = include_str!("../../../docs/config.toml");
+    let mut out = String::with_capacity(doc.len() + 4096);
+    for line in doc.lines() {
+        let t = line.trim_start();
+        let plain_header = t.starts_with('[') && !t.starts_with("[[");
+        if t.is_empty() || t.starts_with('#') || plain_header {
+            out.push_str(line);
+        } else {
+            out.push_str("# ");
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Sections jet and jetmux both read, the same in either's file.
+pub const SHARED: [&str; 3] = ["theme", "colors", "status"];
+
+/// What jetmux reads: jet's config, if any, with jetmux's own file `own`
+/// on top. That file's [`SHARED`] sections layer over jet's; the rest of
+/// it is jetmux's, as under `[jetmux]` in jet's.
+pub fn load_for_jetmux(dirs: &Dirs, own: &Path) -> Result<Loaded, Error> {
+    let main = dirs.candidates().into_iter().find(|p| p.is_file());
+    let main_text = main.as_ref().map(|p| read(p)).transpose()?;
+    let own_table = if own.is_file() {
+        let at = |err: String| Error(format!("{}: {err}", own.display()));
+        let mut table: Table = toml::from_str(&read(own)?).map_err(|e| at(e.to_string()))?;
+        let keys: Vec<String> = table
+            .keys()
+            .filter(|k| !SHARED.contains(&k.as_str()))
+            .cloned()
+            .collect();
+        let mut jetmux = Table::new();
+        for key in keys {
+            if let Some(value) = table.remove(&key) {
+                jetmux.insert(key, value);
+            }
+        }
+        table.insert("jetmux".into(), Value::Table(jetmux));
+        Some((own, table))
+    } else {
+        None
+    };
+    let mut loaded = resolve(main.as_deref().zip(main_text.as_deref()), own_table, dirs)?;
+    if !own.is_file() {
+        loaded.absent.push(own.to_owned());
+    }
+    Ok(loaded)
 }
 
 impl Config {
@@ -611,7 +883,7 @@ impl Config {
 
     /// A config from `text` alone, as if it were the file at `config.toml`.
     pub fn parse(text: &str, dirs: &Dirs) -> Result<Loaded, Error> {
-        resolve(Some((Path::new("config.toml"), text)), dirs)
+        resolve(Some((Path::new("config.toml"), text)), None, dirs)
     }
     /// Key bindings: the defaults (unless turned off) with the config's on
     /// top.
@@ -661,14 +933,19 @@ fn read(path: &Path) -> Result<String, Error> {
     std::fs::read_to_string(path).map_err(|err| Error(format!("reading {}: {err}", path.display())))
 }
 
-fn resolve(main: Option<(&Path, &str)>, dirs: &Dirs) -> Result<Loaded, Error> {
+/// `main` (a jet config) and what it includes, then `top` over it.
+fn resolve(
+    main: Option<(&Path, &str)>,
+    top: Option<(&Path, Table)>,
+    dirs: &Dirs,
+) -> Result<Loaded, Error> {
     let mut loaded = Loaded::default();
     let mut native = Table::new();
     if let Some((path, text)) = main {
-        let at = |err: String| Error(format!("{}: {err}", path.display()));
-        // Typed first: mistakes come back with a line and column.
-        toml::from_str::<Config>(text).map_err(|e| at(e.to_string()))?;
-        native = toml::from_str(text).map_err(|e| at(e.to_string()))?;
+        layer(&mut native, path, text, dirs, &mut loaded)?;
+    }
+    if let Some((path, table)) = top {
+        merge(&mut native, table);
         loaded.sources.push(path.to_owned());
     }
     let inline = match native.remove("ghostty") {
@@ -712,19 +989,26 @@ fn resolve(main: Option<(&Path, &str)>, dirs: &Dirs) -> Result<Loaded, Error> {
         .and_then(Value::as_str)
         .map(str::to_owned);
     if let Some(name) = theme {
-        let path = find_theme(&name, dirs).ok_or_else(|| {
-            let searched: Vec<String> = dirs
-                .theme_dirs()
-                .iter()
-                .map(|d| d.display().to_string())
-                .collect();
-            Error(format!(
-                "theme {name:?} not found in {}",
-                searched.join(", ")
-            ))
-        })?;
-        // Themes carry keys jet has no use for (selection colors...): quietly.
-        let (mut table, _) = ghostty::translate(&ghostty::parse(&read(&path)?));
+        // A file of the user's wins over the built-in theme of that name.
+        let path = find_theme(&name, dirs);
+        let text = match &path {
+            Some(path) => read(path)?,
+            None => bundled_theme(&name)
+                .ok_or_else(|| {
+                    let searched: Vec<String> = dirs
+                        .theme_dirs()
+                        .iter()
+                        .map(|d| d.display().to_string())
+                        .collect();
+                    Error(format!(
+                        "theme {name:?} isn't built in or in {}",
+                        searched.join(", ")
+                    ))
+                })?
+                .to_owned(),
+        };
+        // Themes carry keys jet has no use for: quietly.
+        let (mut table, _) = ghostty::translate(&ghostty::parse(&text));
         let mut colors = match table.remove("colors") {
             Some(Value::Table(colors)) => colors,
             _ => Table::new(),
@@ -733,7 +1017,7 @@ fn resolve(main: Option<(&Path, &str)>, dirs: &Dirs) -> Result<Loaded, Error> {
             merge(&mut colors, own);
         }
         merged.insert("colors".into(), Value::Table(colors));
-        loaded.sources.push(path);
+        loaded.sources.extend(path);
     }
 
     let mut config: Config = Value::Table(merged)
@@ -776,12 +1060,37 @@ fn check(config: &Config) -> Result<(), Error> {
             return Err(Error(format!("keybinds: there's no [profiles.{profile}]")));
         }
     }
+    for (name, rule) in &config.plumb {
+        rule.check(name).map_err(Error)?;
+    }
     let quake = &config.quake;
     if keybinds::parse_chord(&quake.hotkey).is_none() {
         return Err(Error(format!(
             "quake.hotkey: {:?} isn't a key chord",
             quake.hotkey
         )));
+    }
+    let defaults = [
+        ("quake.profile", &quake.profile),
+        ("window.profile", &config.window.profile),
+        ("shell.profile", &config.shell.profile),
+    ];
+    for (key, name) in defaults {
+        let Some(name) = name else { continue };
+        match config.profiles.get(name) {
+            None => return Err(Error(format!("{key}: there's no [profiles.{name}]"))),
+            Some(p) if p.jetmux.is_some() => {
+                return Err(Error(format!(
+                    "{key}: {name} is a jetmux session, which can't be a default shell"
+                )));
+            }
+            Some(_) => {}
+        }
+    }
+    if !(0.0..=1.0).contains(&config.window.unfocused_split_opacity) {
+        return Err(Error(
+            "window.unfocused-split-opacity must be between 0 and 1".into(),
+        ));
     }
     let fits = |start: f32, len: f32| len > 0.0 && start >= 0.0 && start + len <= 1.001;
     if !fits(quake.x, quake.width) || !fits(quake.y, quake.height) {
@@ -808,6 +1117,24 @@ fn check(config: &Config) -> Result<(), Error> {
     Ok(())
 }
 
+/// Ghostty's themes, each from its `[name]` line to the next.
+const THEMES: &str = include_str!("../themes.txt");
+
+fn bundled_themes() -> impl Iterator<Item = (&'static str, &'static str)> {
+    THEMES
+        .split("\n[")
+        .skip(1)
+        .filter_map(|theme| theme.split_once("]\n"))
+}
+
+/// The built-in theme `name`; any case, if no exact match.
+fn bundled_theme(name: &str) -> Option<&'static str> {
+    let exact = bundled_themes().find(|(n, _)| *n == name);
+    exact
+        .or_else(|| bundled_themes().find(|(n, _)| n.eq_ignore_ascii_case(name)))
+        .map(|(_, text)| text)
+}
+
 fn find_theme(name: &str, dirs: &Dirs) -> Option<PathBuf> {
     if name.contains(['/', '\\']) {
         return Some(dirs.expand(name, None)).filter(|p| p.is_file());
@@ -819,6 +1146,36 @@ fn find_theme(name: &str, dirs: &Dirs) -> Option<PathBuf> {
 }
 
 /// `top` over `base`: tables merge key by key, anything else replaces.
+/// Merge the jet config `text` from `path` into `native`, then its
+/// includes on top of it.
+fn layer(
+    native: &mut Table,
+    path: &Path,
+    text: &str,
+    dirs: &Dirs,
+    loaded: &mut Loaded,
+) -> Result<(), Error> {
+    let at = |err: String| Error(format!("{}: {err}", path.display()));
+    // Typed first: mistakes come back with a line and column.
+    let typed = toml::from_str::<Config>(text).map_err(|e| at(e.to_string()))?;
+    let mut table: Table = toml::from_str(text).map_err(|e| at(e.to_string()))?;
+    table.remove("include");
+    merge(native, table);
+    loaded.sources.push(path.to_owned());
+    for file in typed.include {
+        let file = dirs.expand(&file, path.parent());
+        if loaded.sources.contains(&file) {
+            return Err(at(format!("{} is included twice", file.display())));
+        }
+        if !file.is_file() {
+            loaded.absent.push(file);
+            continue;
+        }
+        layer(native, &file, &read(&file)?, dirs, loaded)?;
+    }
+    Ok(())
+}
+
 fn merge(base: &mut Table, top: Table) {
     for (key, value) in top {
         match (base.get_mut(&key), value) {
@@ -865,6 +1222,33 @@ mod tests {
         Config::parse(text, &Dirs::default()).map_err(|e| e.0)
     }
 
+    #[test]
+    fn default_profiles_must_be_plain_profiles() {
+        let ok = "[profiles.bash]\ncommand = \"bash\"\n[quake]\nprofile = \"bash\"\n";
+        assert!(parse(ok).is_ok());
+        let tabs = "[profiles.bash]\ncommand = \"bash\"\n[shell]\nprofile = \"bash\"\n";
+        assert!(parse(tabs).is_ok_and(|l| l.config.shell.profile.as_deref() == Some("bash")));
+        let window = parse("[window]\nprofile = \"gone\"\n").err();
+        assert!(window.is_some_and(|e| e.contains("window.profile: there's no")));
+        let missing = parse("[quake]\nprofile = \"nope\"\n").err();
+        assert!(missing.is_some_and(|e| e.contains("no [profiles.nope]")));
+        let mux = "[profiles.m]\njetmux = { session = \"s\" }\n[quake]\nprofile = \"m\"\n";
+        assert!(parse(mux).err().is_some_and(|e| e.contains("jetmux")));
+    }
+
+    #[test]
+    fn jetmux_runs_the_program_given() {
+        let mut spec = crate::Jetmux {
+            host: Some("voyager".into()),
+            session: "main".into(),
+            up: None,
+            program: None,
+        };
+        assert_eq!(spec.command(), ["ssh", "-T", "voyager", "jetmux", "proxy"]);
+        spec.program = Some("~/.nix-profile/bin/jetmux".into());
+        assert_eq!(spec.command()[3], "~/.nix-profile/bin/jetmux");
+    }
+
     /// A fresh dir under the system temp dir with `files` written in it.
     fn scratch(name: &str, files: &[(&str, &str)]) -> std::io::Result<PathBuf> {
         let dir = std::env::temp_dir().join(format!("jet-config-{}-{name}", std::process::id()));
@@ -877,6 +1261,104 @@ mod tests {
             std::fs::write(path, text)?;
         }
         Ok(dir)
+    }
+
+    #[test]
+    fn includes_layer_on_top() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = scratch(
+            "include",
+            &[
+                (
+                    "config.toml",
+                    "include = [\"box.toml\", \"missing.toml\"]\n[font]\nsize = 12\n\
+                     [profiles.pwsh]\ncommand = \"pwsh\"\n",
+                ),
+                (
+                    "box.toml",
+                    "[font]\nsize = 15\n[profiles.voyager]\ncommand = \"ssh voyager\"\n",
+                ),
+                ("loop.toml", "include = [\"loop.toml\"]\n"),
+            ],
+        )?;
+        let dirs = Dirs {
+            explicit: Some(dir.join("config.toml")),
+            ..Dirs::default()
+        };
+        let loaded = crate::load(&dirs)?;
+        assert_eq!(loaded.config.font.size, 15.0, "the include wins");
+        let names: Vec<&String> = loaded.config.profiles.keys().collect();
+        assert_eq!(names, ["pwsh", "voyager"]);
+        assert_eq!(
+            loaded.sources,
+            [dir.join("config.toml"), dir.join("box.toml")]
+        );
+        assert_eq!(loaded.absent, [dir.join("missing.toml")]);
+
+        let looped = Dirs {
+            explicit: Some(dir.join("loop.toml")),
+            ..Dirs::default()
+        };
+        assert!(crate::load(&looped).is_err_and(|e| e.0.contains("included twice")));
+        Ok(())
+    }
+
+    #[test]
+    fn jetmux_layers_its_own_file_over_jets() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = scratch(
+            "jetmux",
+            &[
+                (
+                    "config.toml",
+                    "[font]\nsize = 12\n[[status.segments]]\ntext = \"jet\"\n\
+                     [jetmux]\nprefix = \"C-a\"\n[jetmux.persist]\ninterval = 60\n",
+                ),
+                (
+                    "jetmux.toml",
+                    "prefix = \"C-b\"\n[[status.segments]]\ntext = \"mux\"\n",
+                ),
+            ],
+        )?;
+        let dirs = Dirs {
+            explicit: Some(dir.join("config.toml")),
+            ..Dirs::default()
+        };
+        let loaded = crate::load_for_jetmux(&dirs, &dir.join("jetmux.toml"))?;
+        let jetmux = loaded.config.jetmux.clone().unwrap_or_default();
+        assert_eq!(jetmux["prefix"].as_str(), Some("C-b"), "its own file wins");
+        assert!(
+            jetmux.contains_key("persist"),
+            "the rest of jet's [jetmux] stays"
+        );
+        assert_eq!(
+            loaded.config.status.segments[0]
+                .text
+                .render(|_| None)
+                .as_deref(),
+            Some("mux"),
+            "shared, on top"
+        );
+        assert_eq!(loaded.config.font.size, 12.0);
+        assert_eq!(
+            loaded.sources,
+            [dir.join("config.toml"), dir.join("jetmux.toml")]
+        );
+
+        // Either alone works.
+        let alone = crate::load_for_jetmux(&Dirs::default(), &dir.join("jetmux.toml"))?;
+        assert_eq!(
+            alone.config.status.segments[0]
+                .text
+                .render(|_| None)
+                .as_deref(),
+            Some("mux")
+        );
+        let without = crate::load_for_jetmux(&dirs, &dir.join("none.toml"))?;
+        assert_eq!(without.absent, [dir.join("none.toml")]);
+        assert_eq!(
+            without.config.jetmux.unwrap_or_default()["prefix"].as_str(),
+            Some("C-a")
+        );
+        Ok(())
     }
 
     #[test]
@@ -924,6 +1406,10 @@ mod tests {
         let rgb = |r, g, b| Rgb { r, g, b };
         // As in Ghostty, colors set anywhere beat the theme's.
         assert_eq!(vt.background, rgb(0, 0, 0));
+        assert_eq!(
+            c.colors.selection_background,
+            Some(crate::Color(rgb(0x33, 0x33, 0x33)))
+        );
         assert_eq!(vt.foreground, rgb(0xab, 0xcd, 0xef));
         assert_eq!(vt.palette, [(1, rgb(255, 0, 0)), (2, rgb(0, 255, 0))]);
         assert!(vt.copy_on_select);
@@ -971,9 +1457,56 @@ mod tests {
     }
 
     #[test]
+    fn the_starter_config_is_the_defaults() -> Result<(), String> {
+        let loaded = parse(&crate::starter())?;
+        assert_eq!(loaded.warnings, Vec::<String>::new());
+        assert_eq!(loaded.config, Config::default());
+        Ok(())
+    }
+
+    #[test]
+    fn with_theme_edits_only_the_theme() {
+        let set = |text: &str| crate::with_theme(text, "Night");
+        let named = "[font]\nsize = 13\n\n[theme]\nname = \"Day\" # mine\n[colors]\n";
+        assert_eq!(
+            set(named).as_deref(),
+            Some("[font]\nsize = 13\n\n[theme]\nname = \"Night\"\n[colors]\n")
+        );
+        let empty = set("[theme]\n# name = \"Day\"\n");
+        assert_eq!(
+            empty.as_deref(),
+            Some("[theme]\nname = \"Night\"\n# name = \"Day\"\n")
+        );
+        let none = set("[font]\r\nsize = 13\r\n");
+        assert_eq!(
+            none.as_deref(),
+            Some("[font]\r\nsize = 13\r\n\r\n[theme]\r\nname = \"Night\"\r\n")
+        );
+        assert_eq!(set("theme = { name = \"Day\" }\n"), None);
+    }
+
+    #[test]
     fn missing_theme_is_an_error() {
         let err = parse("[theme]\nname = \"Nope\"\n").err();
-        assert!(err.is_some_and(|e| e.contains("theme \"Nope\" not found")));
+        assert!(err.is_some_and(|e| e.contains("theme \"Nope\" isn't built in")));
+    }
+
+    #[test]
+    fn ghosttys_themes_are_built_in() -> Result<(), String> {
+        let loaded = parse("[theme]\nname = \"poimandres\"\n")?;
+        let background = loaded.config.colors.background.map(|c| c.0);
+        assert_eq!(
+            background,
+            Some(Rgb {
+                r: 0x1a,
+                g: 0x1e,
+                b: 0x28
+            })
+        );
+        // Names a file couldn't have on Windows work too.
+        assert!(parse("[theme]\nname = \"Paper Crane: Midnight Ink\"\n").is_ok());
+        assert!(Dirs::default().themes().len() > 900);
+        Ok(())
     }
 
     #[test]

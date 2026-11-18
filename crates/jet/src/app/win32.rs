@@ -10,6 +10,7 @@
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::num::NonZeroIsize;
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -56,27 +57,30 @@ use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DispatchMessageW,
-    FLASHW_TIMERNOFG, FLASHW_TRAY, FLASHWINFO, FlashWindowEx, GWLP_USERDATA, GetCaretBlinkTime,
-    GetCursorPos, GetForegroundWindow, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, HICON,
-    HTCAPTION, HTCLIENT, HTCLOSE, HTMAXBUTTON, HTMINBUTTON, HTTOP, IDC_ARROW, IDC_HAND, IDC_IBEAM,
-    IDC_SIZENS, IDC_SIZEWE, IsIconic, IsWindowVisible, IsZoomed, KillTimer, LoadCursorW, LoadIconW,
-    MSG, NCCALCSIZE_PARAMS, PostMessageW, PostQuitMessage, RegisterClassExW, SM_CXDRAG,
-    SM_CXPADDEDBORDER, SM_CYDRAG, SM_CYFRAME, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
-    SW_SHOWNORMAL, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    SendMessageW, SetCursor, SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos,
-    SetWindowTextW, ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WM_APP, WM_CAPTURECHANGED,
-    WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN,
-    WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WM_SETCURSOR, WM_SIZE, WM_SYSCHAR, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
-    WNDCLASSEXW, WS_CAPTION, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW, WS_POPUP,
+    CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow,
+    DispatchMessageW, FLASHW_TIMERNOFG, FLASHW_TRAY, FLASHWINFO, FlashWindowEx, GWLP_USERDATA,
+    GetCaretBlinkTime, GetCursorPos, GetForegroundWindow, GetMessageW, GetSystemMetrics,
+    GetWindowLongPtrW, HICON, HTCAPTION, HTCLIENT, HTCLOSE, HTMAXBUTTON, HTMINBUTTON, HTTOP,
+    IDC_APPSTARTING, IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_HELP, IDC_IBEAM, IDC_NO, IDC_SIZEALL,
+    IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IDC_WAIT, IsIconic, IsWindowVisible,
+    IsZoomed, KillTimer, LoadCursorW, LoadIconW, MSG, NCCALCSIZE_PARAMS, PostMessageW,
+    PostQuitMessage, RegisterClassExW, SM_CXDRAG, SM_CXPADDEDBORDER, SM_CYDRAG, SM_CYFRAME,
+    SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetCursor, SetForegroundWindow, SetTimer,
+    SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, WINDOW_EX_STYLE,
+    WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND,
+    WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDBLCLK,
+    WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_SETCURSOR, WM_SIZE, WM_SYSCHAR, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    WM_TIMER, WNDCLASSEXW, WS_CAPTION, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW, WS_POPUP,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
 use crate::app::Kind;
-use crate::app::{App, BoxError, ConfigFile, Host, Pointer, Timer, Wake, WindowRequest};
+use crate::app::{
+    App, BoxError, ConfigFile, First, Host, Pointer, Start, Timer, Wake, WindowRequest,
+};
 use crate::chrome::Button;
 use crate::dwm;
 use crate::keymap;
@@ -285,9 +289,46 @@ impl Host for Win32 {
         problem
     }
 
+    fn autostart(&mut self, on: bool) {
+        if let Err(err) = quake::autostart(on) {
+            eprintln!("jet: {err}");
+        }
+    }
+
     fn style_frame(&mut self, config: &Config) {
         let vt = config.vt_settings();
         dwm::apply(self.hwnd, &config.window, vt.background, vt.foreground);
+    }
+
+    /// Its association, else Notepad: a `.toml` often has none.
+    fn open_file(&mut self, path: &Path) {
+        let file = HSTRING::from(path.as_os_str());
+        let open = |program: &HSTRING, args: PCWSTR| unsafe {
+            ShellExecuteW(
+                Some(self.hwnd),
+                w!("open"),
+                program,
+                args,
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        if open(&file, PCWSTR::null()).0 as usize <= 32 {
+            let done = open(&HSTRING::from("notepad.exe"), PCWSTR(file.as_ptr()));
+            if done.0 as usize <= 32 {
+                eprintln!(
+                    "jet: opening {} failed ({})",
+                    path.display(),
+                    done.0 as usize
+                );
+            }
+        }
+    }
+
+    fn beep(&mut self) {
+        use windows::Win32::System::Diagnostics::Debug::MessageBeep;
+        use windows::Win32::UI::WindowsAndMessaging::MB_OK;
+        let _ = unsafe { MessageBeep(MB_OK) };
     }
 
     fn open_url(&mut self, url: &str) {
@@ -379,8 +420,10 @@ impl Host for Win32 {
 }
 
 /// A terminal window, or with `quake` the hotkey-toggled one.
-pub fn run(quake: bool) -> ExitCode {
-    match run_window(quake) {
+/// `background`: started by autostart, so hidden until the hotkey even when
+/// the hotkey can't be had, and gone if a quake is already running.
+pub fn run(quake: bool, background: bool, first: First) -> ExitCode {
+    match run_window(quake, background, first) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("jet: {err}");
@@ -389,10 +432,17 @@ pub fn run(quake: bool) -> ExitCode {
     }
 }
 
-fn run_window(quake: bool) -> Result<(), BoxError> {
-    if quake && quake::signal_running() {
-        return Ok(());
-    }
+fn run_window(quake: bool, background: bool, first: First) -> Result<(), BoxError> {
+    // One quake: another toggles it, or leaves it be from autostart.
+    let _claim = match quake.then(quake::Claim::take) {
+        Some(None) => {
+            if !background {
+                quake::signal_running();
+            }
+            return Ok(());
+        }
+        claim => claim.flatten(),
+    };
     // For the taskbar button's progress (ITaskbarList3). Without it that's
     // all that's lost.
     let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
@@ -436,9 +486,12 @@ fn run_window(quake: bool) -> Result<(), BoxError> {
     };
 
     let settings = ConfigFile::load();
-    // Fixed for the window's life: an opacity edit that crosses 1 applies
-    // on the next start.
+    // Before the GPU: the shell's startup overlaps it.
+    let start = Start::new(&settings.config, quake, first);
+    // Fixed for the window's life: an opacity edit that crosses 1, or a
+    // low-latency one, applies on the next start.
     let see_through = settings.config.window.opacity < 1.0;
+    let paced = see_through || settings.config.window.low_latency;
     let instance = Gpu::instance(see_through);
     let handle = NonZeroIsize::new(hwnd.0 as isize).ok_or("null window handle")?;
     // SAFETY: the surface is dropped with App in WM_DESTROY, before the
@@ -453,7 +506,7 @@ fn run_window(quake: bool) -> Result<(), BoxError> {
         hwnd,
         quake: quake.then(|| QuakeWindow::new(hwnd, class.hIcon)),
         taskbar: Taskbar::new(),
-        vblank: see_through.then(|| Vblank::start(hwnd)).flatten(),
+        vblank: paced.then(|| Vblank::start(hwnd)).flatten(),
         later: Vec::new(),
         pending_key: None,
         suppress_char: false,
@@ -463,12 +516,16 @@ fn run_window(quake: bool) -> Result<(), BoxError> {
     };
     let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
     let focused = unsafe { GetForegroundWindow() } == hwnd;
-    let mut app = App::new(host, &instance, surface, dpi, focused, settings)?;
+    let mut app = App::new(host, &instance, surface, dpi, focused, settings, start)?;
+    if !quake {
+        let on = app.settings.config.quake.autostart;
+        app.host.autostart(on);
+    }
     // Shown at once when the hotkey can't be had, to say so.
     let mut show_quake = false;
     if let Some(window) = &app.host.quake {
         app.hotkey_problem = window.register(&app.settings.config.quake.hotkey).err();
-        show_quake = app.hotkey_problem.is_some();
+        show_quake = app.hotkey_problem.is_some() && !background;
         app.refresh_banner();
     }
     let size = if quake {
@@ -675,6 +732,13 @@ impl App<Win32> {
             WM_CLOSE | quake::WM_APP_HIDE if self.host.quake.is_some() => {
                 return After::Then(Box::new(quake::hide));
             }
+            // Asking first, in the palette: something's running.
+            WM_CLOSE if !self.close_requested() => return After::Result(0),
+            quake::WM_APP_QUIT if self.host.quake.is_some() => {
+                return After::Then(Box::new(|hwnd| {
+                    let _ = unsafe { DestroyWindow(hwnd) };
+                }));
+            }
             quake::WM_APP_PLACE => {
                 let placed = self.settings.config.quake.clone();
                 if self.host.quake.is_some() && unsafe { IsWindowVisible(self.host.hwnd) }.as_bool()
@@ -725,6 +789,7 @@ impl App<Win32> {
             Pointer::Arrow => IDC_ARROW,
             Pointer::Link => IDC_HAND,
             Pointer::Text => IDC_IBEAM,
+            Pointer::Shape(shape) => win32_cursor(shape.name()),
         };
         match unsafe { LoadCursorW(None, shape) } {
             Ok(cursor) => {
@@ -1181,4 +1246,23 @@ fn output_of(monitor: HMONITOR) -> Option<IDXGIOutput> {
         .map_while(|i| unsafe { factory.EnumAdapters1(i) }.ok())
         .flat_map(|adapter| (0..).map_while(move |j| unsafe { adapter.EnumOutputs(j) }.ok()))
         .find(|output| unsafe { output.GetDesc() }.is_ok_and(|d| d.Monitor == monitor))
+}
+
+/// The nearest stock cursor to a CSS one; Windows has a dozen or so.
+fn win32_cursor(css: &str) -> PCWSTR {
+    match css {
+        "text" | "vertical-text" => IDC_IBEAM,
+        "pointer" | "grab" | "grabbing" => IDC_HAND,
+        "wait" => IDC_WAIT,
+        "progress" => IDC_APPSTARTING,
+        "help" => IDC_HELP,
+        "crosshair" | "cell" => IDC_CROSS,
+        "not-allowed" | "no-drop" => IDC_NO,
+        "move" | "all-scroll" => IDC_SIZEALL,
+        "ew-resize" | "col-resize" | "e-resize" | "w-resize" => IDC_SIZEWE,
+        "ns-resize" | "row-resize" | "n-resize" | "s-resize" => IDC_SIZENS,
+        "nwse-resize" | "nw-resize" | "se-resize" => IDC_SIZENWSE,
+        "nesw-resize" | "ne-resize" | "sw-resize" => IDC_SIZENESW,
+        _ => IDC_ARROW,
+    }
 }

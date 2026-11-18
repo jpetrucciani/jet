@@ -130,6 +130,11 @@ impl Pictures {
         Ok(out)
     }
 
+    /// A picture placements showed, until none does.
+    pub fn get(&self, key: u64) -> Option<Arc<Picture>> {
+        self.cache.get(&key).cloned()
+    }
+
     /// `image` as RGBA, copied the first time it's seen. `None` for a
     /// format this can't convert.
     fn picture(&mut self, image: &Image<'_>) -> Result<Option<Arc<Picture>>, Error> {

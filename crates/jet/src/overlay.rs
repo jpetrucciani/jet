@@ -33,6 +33,7 @@ const PALETTE_ROWS: usize = 12;
 pub enum Overlay {
     Find(Find),
     Palette(Palette),
+    Rename(Rename),
 }
 
 /// What a key did to an overlay.
@@ -47,7 +48,10 @@ pub enum Outcome {
     Close,
     /// To the `n`th match up (negative) or down.
     Step(isize),
-    Run(Action),
+    /// A palette entry was picked.
+    Pick(Choice),
+    /// Name the tab this (empty: no name of its own).
+    Rename(String),
 }
 
 /// The colors overlays draw with: text on a box a step off the terminal's
@@ -124,6 +128,8 @@ impl Field {
 pub struct Find {
     pub pane: PaneId,
     query: Field,
+    /// The query is a regular expression (Alt+R toggles).
+    pub regex: bool,
 }
 
 impl Find {
@@ -131,6 +137,7 @@ impl Find {
         Self {
             pane,
             query: Field::default(),
+            regex: false,
         }
     }
 
@@ -149,6 +156,10 @@ impl Find {
         };
         match input.key {
             Key::Escape => Outcome::Close,
+            Key::R if input.mods.contains(Mods::ALT) => {
+                self.regex = !self.regex;
+                Outcome::Edited
+            }
             Key::Enter | Key::F3 => Outcome::Step(back),
             Key::ArrowUp => Outcome::Step(-1),
             Key::ArrowDown => Outcome::Step(1),
@@ -168,6 +179,7 @@ impl Find {
         let count = match &snapshot.search {
             _ if self.query.0.is_empty() => String::new(),
             None => "…".to_owned(),
+            Some(Matches { invalid: true, .. }) => "bad regex".to_owned(),
             Some(Matches { total: 0, .. }) => "no matches".to_owned(),
             Some(m) => {
                 let more = if m.total >= Matches::CAP { "+" } else { "" };
@@ -175,7 +187,7 @@ impl Find {
                 format!("{at}/{}{more}", m.total)
             }
         };
-        let label = " find ";
+        let label = if self.regex { " regex " } else { " find " };
         let count_w = Line::text_width(&count) + 1;
         let field_w = width.saturating_sub(Line::text_width(label) + count_w);
         // The query's end shows when it's longer than the field.
@@ -199,15 +211,97 @@ impl Find {
     }
 }
 
+/// The tab-name prompt, filled with the name it has.
+pub struct Rename {
+    /// The tab's id.
+    pub tab: u64,
+    name: Field,
+}
+
+impl Rename {
+    pub fn new(tab: u64, name: &str) -> Self {
+        Self {
+            tab,
+            name: Field(name.to_owned()),
+        }
+    }
+
+    pub fn key(&mut self, input: &KeyInput) -> Outcome {
+        if input.action == KeyAction::Release {
+            return Outcome::Nothing;
+        }
+        match input.key {
+            Key::Escape => Outcome::Close,
+            Key::Enter => Outcome::Rename(self.name.0.trim().to_owned()),
+            _ => edited(self.name.edit(input)),
+        }
+    }
+
+    pub fn paste(&mut self, text: &str) -> Outcome {
+        edited(Some(self.name.paste(text)))
+    }
+
+    /// Draw the prompt over the top of `snapshot`, like the find bar.
+    pub fn draw(&self, snapshot: &mut Snapshot, colors: Colors, typing: bool) {
+        let cols = usize::from(snapshot.cols);
+        let width = cols.min(FIND_WIDTH);
+        let label = " tab name ";
+        let field_w = width.saturating_sub(Line::text_width(label) + 1);
+        let name = tail(&self.name.0, field_w.saturating_sub(1));
+        let mut line = Line::default();
+        line.push_text(label, Line::text_width(label), colors.cell(true, true));
+        line.push_text(name, field_w, colors.cell(false, false));
+        line.push_text(" ", 1, colors.cell(false, false));
+        let x = cols - line.cells.len().min(cols);
+        if let Some(top) = snapshot.lines.first_mut() {
+            *top = Arc::new(top.with_overlay(x, &line));
+        }
+        let cursor = x + Line::text_width(label) + Line::text_width(name);
+        snapshot.cursor = typing.then(|| Cursor {
+            x: u16::try_from(cursor.min(cols.saturating_sub(1))).unwrap_or(0),
+            y: 0,
+            shape: CursorShape::Bar,
+            blinking: false,
+        });
+    }
+}
+
+/// What picking a palette entry does.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Choice {
+    Run(Action),
+    /// Close this after all, with something running in it.
+    Close(Closing),
+    /// Paste this into the pane after all.
+    Paste(PaneId, String),
+    /// Use this theme, and write it to the config.
+    Theme(String),
+    /// Leave things as they are.
+    Cancel,
+}
+
+/// What's closing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Closing {
+    Pane(PaneId),
+    /// A tab, by its id.
+    Tab(u64),
+    Window,
+}
+
 /// A palette entry.
 pub struct Command {
     pub label: String,
     /// Its key chord, if bound.
     pub hint: String,
-    pub action: Action,
+    pub choice: Choice,
 }
 
+/// A filtered list to pick from: the commands, or a short question's
+/// answers.
 pub struct Palette {
+    /// Before the query: what's being asked, if not for a command.
+    prompt: String,
     query: Field,
     commands: Vec<Command>,
     /// Indexes into `commands` that match the query, best first.
@@ -225,9 +319,10 @@ struct Frame {
 }
 
 impl Palette {
-    pub fn new(commands: Vec<Command>) -> Self {
+    pub fn new(prompt: &str, commands: Vec<Command>) -> Self {
         let shown = (0..commands.len()).collect();
         Self {
+            prompt: prompt.to_owned(),
             query: Field::default(),
             commands,
             shown,
@@ -243,7 +338,7 @@ impl Palette {
         let shift = input.mods.contains(Mods::SHIFT);
         match input.key {
             Key::Escape => Outcome::Close,
-            Key::Enter => self.chosen().map_or(Outcome::Close, Outcome::Run),
+            Key::Enter => self.chosen().map_or(Outcome::Close, Outcome::Pick),
             Key::ArrowUp => self.move_by(-1),
             Key::ArrowDown => self.move_by(1),
             Key::Tab => self.move_by(if shift { -1 } else { 1 }),
@@ -265,9 +360,22 @@ impl Palette {
         outcome
     }
 
-    fn chosen(&self) -> Option<Action> {
+    fn chosen(&self) -> Option<Choice> {
+        self.current().cloned()
+    }
+
+    /// The selected entry's choice.
+    pub fn current(&self) -> Option<&Choice> {
         let i = *self.shown.get(self.selected)?;
-        self.commands.get(i).map(|c| c.action.clone())
+        self.commands.get(i).map(|c| &c.choice)
+    }
+
+    /// Start on the entry for `choice`, if there is one.
+    pub fn select(&mut self, choice: &Choice) {
+        let same = |&i: &usize| self.commands.get(i).is_some_and(|c| c.choice == *choice);
+        if let Some(at) = self.shown.iter().position(same) {
+            self.selected = at;
+        }
     }
 
     fn move_by(&mut self, n: isize) -> Outcome {
@@ -296,7 +404,7 @@ impl Palette {
 
     /// The command under pane cell `(col, row)`, `None` outside the box,
     /// and `Some(None)` on its query row.
-    pub fn at(&self, (cols, rows): (u16, u16), col: u16, row: u16) -> Option<Option<Action>> {
+    pub fn at(&self, (cols, rows): (u16, u16), col: u16, row: u16) -> Option<Option<Choice>> {
         let f = frame(cols, rows);
         let (col, row) = (usize::from(col), usize::from(row));
         if !(f.x..f.x + f.width).contains(&col) || !(f.y..=f.y + f.items).contains(&row) {
@@ -307,7 +415,7 @@ impl Palette {
         }
         let first = self.scroll(f.items);
         let i = *self.shown.get(first + row - f.y - 1)?;
-        Some(self.commands.get(i).map(|c| c.action.clone()))
+        Some(self.commands.get(i).map(|c| c.choice.clone()))
     }
 
     /// The first shown command that's in view: the selection stays on
@@ -323,7 +431,11 @@ impl Palette {
         if f.width == 0 {
             return;
         }
-        let prompt = " > ";
+        let prompt = match self.prompt.as_str() {
+            "" => " > ".to_owned(),
+            asked => format!(" {asked} > "),
+        };
+        let prompt = prompt.as_str();
         let mut rows = Vec::new();
         let mut input = Line::default();
         input.push_text(prompt, Line::text_width(prompt), colors.cell(false, true));
@@ -348,7 +460,7 @@ impl Palette {
             rows.push(line);
         }
         if self.shown.is_empty() {
-            let none = "  no matching commands";
+            let none = "  nothing matches";
             rows.push(Line::from_text(none, f.width, colors.cell(false, true)));
         }
         for (row, line) in rows.iter().enumerate() {

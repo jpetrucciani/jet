@@ -55,6 +55,10 @@ struct Invocation {
 }
 
 fn run(args: Vec<String>) -> Result<ExitCode, String> {
+    if args.iter().any(|a| a == "-V" || a == "--version") {
+        println!("jet-cli {}", env!("CARGO_PKG_VERSION"));
+        return Ok(ExitCode::SUCCESS);
+    }
     if args.iter().any(|a| a == "-h" || a == "--help") || args.is_empty() {
         println!("{USAGE}");
         return Ok(ExitCode::SUCCESS);

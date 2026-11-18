@@ -16,6 +16,13 @@
 # display scaling. "Windows only" keys are accepted elsewhere and ignored, so
 # one file serves every machine.
 
+# More configs layered on top of this one, in order: each wins over this
+# file and the ones before it, and tables like [profiles] combine. Paths are
+# relative to this file or start with ~/. Missing files are skipped (`jet
+# config check` lists them) and picked up once they appear, so a managed
+# config.toml can include a per-machine file that may not exist yet.
+include = []                  # e.g. ["local.toml"]
+
 [font]
 # family = "JetBrains Mono"   # an installed family, any case; unset or not
                               # found: the bundled JetBrains Mono
@@ -24,14 +31,19 @@ features = []                 # OpenType features over the defaults:
                               # ["-calt"] drops ligatures, ["ss01", "zero"]
 
 [theme]
-# name = "Poimandres"         # a Ghostty theme: a path, or a file name in
-                              # themes/ beside this config or Ghostty's.
-                              # [colors] below override it.
+# name = "Poimandres"         # one of Ghostty's ~900 themes, built in (the
+                              # palette's Choose theme previews them), or
+                              # your own: a path, or a file name in themes/
+                              # beside this config or Ghostty's, which wins
+                              # over a built-in one of that name. [colors]
+                              # below override it.
 
 [colors]
 # foreground = "#a6accd"      # unset: jet's defaults, or the theme's
 # background = "#1b1e28"
 # cursor = "#add7ff"          # unset: jet's default, or the theme's
+# selection-background = "#303340"   # unset: a blue tint over each cell,
+# selection-foreground = "#ffffff"   # text keeping its color; or the theme's
 # palette = { 0 = "#1b1e28", 1 = "#d0679d", 2 = "#5de4c7" }   # any of 0-255
 
 [window]
@@ -52,6 +64,19 @@ corners = "default"           # Windows only: default | round | small | square
 titlebar-color = "background" # Windows only: background | system | #rrggbb
 border-color = "system"       # Windows only: system | none | background | #rrggbb
 taskbar-progress = true       # Windows only: OSC 9;4 progress on the taskbar
+low-latency = false           # Windows only: present without waiting for
+                              # vblank, so typing shows ~3 ms sooner; a frame
+                              # can tear. Read at start
+restore = false               # reopen the tabs, splits and each shell's
+                              # directory the last window closed with (the
+                              # shells, not what ran in them). Not quake's
+# profile = "bash"            # what a new window's first tab runs: a
+                              # [profiles] name (not a jetmux one); unset:
+                              # [shell] profile
+confirm-close = true          # ask before closing a tab, split or window
+                              # with something besides its shell running
+unfocused-split-opacity = 0.7 # splits without the keyboard fade to this;
+                              # 1 leaves them as they are
 
 [tab-bar]
 show = "auto"                 # auto (2+ tabs) | always | never
@@ -71,12 +96,40 @@ width = 24                    # cells, when left or right
 # icon = "🐚"                 # before its tabs' titles: any text, an .svg
                               # file (~/ or beside this config), or inline
                               # '<svg viewBox="0 0 24 24">...</svg>'
+follow-ssh = false            # a new tab or split from a pane running ssh
+                              # runs that ssh again (same options; the
+                              # system's ssh), in the directory the remote
+                              # shell last reported (OSC 7). Pair with
+                              # ControlMaster in ~/.ssh/config to skip
+                              # logging in again. Same for wsl.exe: the same
+                              # distro and user, with --cd to that directory
+integration = true            # bash (4+), zsh and PowerShell started in jet
+                              # mark prompts (OSC 133) and report their
+                              # directory without any setup in your dotfiles.
+                              # Commands that run a script are left alone
+# profile = "bash"            # what new tabs and splits run when none is
+                              # named: a [profiles] name (not a jetmux one);
+                              # unset: the command above
 
 # Named shells, opened with new_tab:<name> or new_split:<side>:<name>.
 # [profiles.ubuntu]
 # command = "wsl.exe -d Ubuntu"   # unset: [shell]'s
 # icon = "🐧"
 # cwd = "C:/src"                  # unset: where the focused shell is
+#
+# [profiles.voyager]               # straight into a box, no shell in between
+# command = "ssh voyager"
+#
+# [profiles.dev]                   # a jetmux session: its tabs and splits show
+# jetmux = { host = "voyager", session = "main", up = "dev" }
+#                                  # as jet's. host: over `ssh -T`, unset for
+#                                  # this machine's daemon (not on Windows); up:
+#                                  # the host's jetmux profile to start it from
+#                                  # if it isn't running; program: jetmux's path
+#                                  # there when ssh's PATH lacks it (~/ works
+#                                  # over ssh), unset: PATH. icon: as above,
+#                                  # unset: a split-pane mark. Opening it again
+#                                  # adds a tab to the session
 
 [terminal]
 scrollback = 10000            # lines of history
@@ -84,13 +137,55 @@ copy-on-select = true         # selecting copies to the clipboard
 clipboard-write = true        # programs may set the clipboard (OSC 52, as tmux
                               # and Neovim do over SSH); they can never read it
 notifications = true          # desktop notifications programs ask for (OSC 9,
-                              # OSC 777), except from the pane you're looking at
+                              # OSC 777), except from the pane you're looking
+                              # at; kitty's OSC 99 picks when to show (o=)
+paste-protection = true       # ask before pasting a newline where it would
+                              # run (a program without bracketed paste, like
+                              # a plain prompt)
+bell = ["flash", "attention"] # flash: the window, when it's in front;
+                              # attention: the taskbar button (the Dock icon
+                              # bounces), when it isn't; sound: the system
+                              # alert (Windows only). [] ignores the bell
 
 [cursor]
 style = "block"               # block | bar | underline
 blink = true
 
 # Segments about the focused pane. None by default.
+# Plumbing, after Plan 9's plumber: Ctrl+click text a rule's regex matches
+# (it's underlined while hovered) and the rule acts on it. Where several
+# match, the longest match wins. Rules are named so an include can replace
+# one. Each has exactly one action:
+#   open = "URL"        opened here by the system (http, https, mailto)
+#   run = [...]         a program run here in the background
+#   view = [...]        a split running it where the pane is: over the
+#                       pane's ssh, in the remote shell's directory (OSC 7),
+#                       else here; in = "right" | "down" | "left" | "up" | "tab"
+# {0} is the whole match, {name} a (?<name>...) group, {cwd} and {host} the
+# pane's. Each word is filled on its own and quoted for the remote shell, so
+# text on screen can't add words or commands. on = "any" | "local" |
+# "remote" (ssh in front) picks which panes a rule is for. Rules come
+# before the built-in URL opening.
+#
+# [plumb.issue]
+# match = '#(?<n>\d+)'
+# open = "https://github.com/me/repo/issues/{n}"
+#
+# [plumb.code]                    # file:line here: your editor
+# match = '(?<file>[\w./-]+\.\w+):(?<line>\d+)'
+# on = "local"
+# run = ["code", "--goto", "{file}:{line}"]   # Windows: ["cmd", "/c", "code", ...]
+#
+# [plumb.code-remote]             # file:line over ssh: an editor split there
+# match = '(?<file>[\w./-]+\.\w+):(?<line>\d+)'
+# on = "remote"
+# view = ["nvim", "+{line}", "{file}"]
+#
+# [plumb.commit]
+# match = '\b[0-9a-f]{7,40}\b'
+# view = ["git", "show", "{0}"]
+# in = "down"
+
 [status]
 position = "titlebar"         # titlebar: beside the window buttons, with
                               #   decorations = "custom" (else bottom)
@@ -129,10 +224,18 @@ x = 0.0                       # placement as fractions of the monitor's work
 y = 0.0                       # area: the left third is width = 0.333,
 width = 1.0                   # height = 1.0
 height = 0.45
+# profile = "bash"            # what its first tab runs: a [profiles] name
+                              # (not a jetmux one); unset: [window] profile,
+                              # else [shell]'s
 hide-on-blur = true           # hide when another window takes the focus
 always-on-top = true
 taskbar = false               # show in the taskbar and Alt+Tab (macOS: the
                               # Dock, read at start; ignored on Linux)
+over-taskbar = false          # Windows only: x, y, width and height are of
+                              # the whole monitor, so it can cover the taskbar
+autostart = true              # Windows only: keep `jet quake` running,
+                              # started at sign-in and by any jet window
+                              # that finds it isn't (hidden until the hotkey)
 
 # Ghostty's chord and action names, so `keybind = ...` lines carry over.
 # Modifiers: ctrl, shift, alt (opt), super (cmd, win). Keys: a-z, 0-9,
@@ -148,14 +251,35 @@ taskbar = false               # show in the taskbar and Alt+Tab (macOS: the
 # reset_font_size, jump_to_prompt:N (negative is up) and copy_command_output
 # (both need a shell that marks prompts with OSC 133; unbound by default for
 # the latter), start_search, end_search, navigate_search:next|previous (next
-# goes up, to older output), toggle_command_palette, toggle_split_zoom,
+# goes up, to older output), copy_mode, quick_select, toggle_command_palette,
+# toggle_split_zoom, resize_split:left|right|up|down[:PERCENT] (moves the
+# nearest divider that way, 5% of its split by default), equalize_splits,
+# rename_tab (an empty name gives the tab back its shell title),
+# move_tab:N (negative is left; unbound by default, like rename_tab),
 # reload_config, ignore (swallow the key), unbind (give it back to the
-# program).
+# program), copy_version (jet's version, also in the palette as About),
+# open_config (in your editor; a new file starts as this one, commented
+# out), choose_theme (a palette of the themes found, previewed as you move;
+# Enter writes it to the config), new_tab_menu (the profiles, as on a right
+# click of the tab bar),
+# detach (take the focused jetmux session's tabs out of jet,
+# still running there; closing a jetmux tab or split closes it there too),
+# text:TEXT (send it as if typed; \r \n \t \e \xHH \u{HHHH}
+# escapes, so "ctrl+enter" = 'text:\r' makes Ctrl+Enter a plain Enter).
 #
 # The find bar searches the focused pane's screen and history as you type,
 # matching case only when the query has capitals. Enter or Up goes to the
-# match above, Shift+Enter or Down the one below, Escape closes it. The
+# match above, Shift+Enter or Down the one below, Alt+R switches between
+# text and regular expressions (Rust regex syntax), Escape closes it. The
 # palette runs any of the actions above by name.
+#
+# Copy mode (ctrl+shift+x, cmd+shift+x) puts a cursor on the focused pane:
+# h j k l and the arrows, w b e, 0 ^ $, g G, H M L, Ctrl+U/D, Ctrl+B/F and
+# Page Up/Down move it (into history too); v selects, V whole lines, Ctrl+V
+# a block, o swaps ends; y or Enter copies, Escape or q leaves.
+# Quick select (ctrl+shift+space, cmd+shift+space) labels the URLs, paths,
+# git hashes and IP addresses in view: type a label to copy it, in capitals
+# to also type it into the pane; Escape leaves.
 [keybinds]
 # defaults = false            # start from no bindings at all
 #
@@ -185,15 +309,22 @@ taskbar = false               # show in the taskbar and Alt+Tab (macOS: the
 # "ctrl+shift+page_up" = "jump_to_prompt:-1"
 # "ctrl+shift+page_down" = "jump_to_prompt:1"
 # "ctrl+shift+f" = "start_search"
+# "ctrl+shift+x" = "copy_mode"
+# "ctrl+shift+space" = "quick_select"
 # "ctrl+shift+p" = "toggle_command_palette"
 # "ctrl+shift+enter" = "toggle_split_zoom"
+# "ctrl+shift+alt+left" = "resize_split:left"   # and right, up, down
+# "ctrl+shift+alt+equal" = "equalize_splits"
+# "ctrl+shift+alt+d" = "detach"  # on a jetmux tab; nothing elsewhere
 #
 # On macOS they're Command chords instead, as in Ghostty: cmd+c, cmd+v,
 # cmd+t, cmd+w, cmd+1..9, cmd+d / cmd+shift+d (split right / down),
 # cmd+alt+arrows, cmd+[ and cmd+], cmd+shift+[ and cmd+shift+] (tabs),
 # cmd+= / cmd+- / cmd+0, cmd+up / cmd+down (prompts), cmd+f, cmd+g and
-# cmd+shift+g (search), cmd+shift+p (palette), cmd+shift+enter (zoom), plus
-# ctrl+tab.
+# cmd+shift+g (search), cmd+shift+x (copy mode), cmd+shift+space (quick
+# select), cmd+shift+p (palette), cmd+shift+enter (zoom), cmd+ctrl+arrows
+# (resize splits), cmd+ctrl+= (equalize), cmd+shift+alt+d (detach),
+# plus ctrl+tab.
 #
 # Your own, for example:
 # "ctrl+shift+d" = "new_split:right"
@@ -206,11 +337,22 @@ taskbar = false               # show in the taskbar and Alt+Tab (macOS: the
 # com.mitchellh.ghostty/ on macOS), jet imports it. Keys above win over
 # keys here, which win over the imported file. Supported: font-family,
 # font-size, font-feature, theme, palette, background, foreground,
-# cursor-color, background-opacity, window-padding-x/y, command, keybind,
-# cursor-style, cursor-style-blink, copy-on-select, clipboard-write,
-# desktop-notifications.
+# cursor-color, selection-background/foreground, background-opacity,
+# window-padding-x/y, command, keybind, cursor-style, cursor-style-blink,
+# copy-on-select, clipboard-write, desktop-notifications,
+# clipboard-paste-protection, confirm-close-surface, unfocused-split-opacity.
 # Others log a warning and are ignored.
 [ghostty]
 # config-file = "~/.config/ghostty/config"   # or false to skip the import
 # cursor-style = "bar"
 # font-feature = ["-calt"]
+
+# jetmux's settings, for keeping both programs in this one file: every key
+# from docs/jetmux.toml, without the shared [theme], [colors] and [status],
+# which jetmux reads from here too (and from anything `include` brings in).
+# ~/.config/jetmux/config.toml, if it exists, goes on top and wins.
+# [jetmux]
+# prefix = "C-a"
+#
+# [jetmux.bar]
+# style = "powerline"

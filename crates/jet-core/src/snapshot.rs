@@ -4,6 +4,8 @@
 use std::ops::Range;
 use std::sync::{Arc, Mutex, PoisonError};
 
+use jetmux_proto::Matches;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Rgb {
     pub r: u8,
@@ -28,6 +30,18 @@ impl From<libghostty_vt::style::RgbColor> for Rgb {
             g: c.g,
             b: c.b,
         }
+    }
+}
+
+impl From<Rgb> for jetmux_proto::input::Rgb {
+    fn from(Rgb { r, g, b }: Rgb) -> Self {
+        Self { r, g, b }
+    }
+}
+
+impl From<jetmux_proto::input::Rgb> for Rgb {
+    fn from(jetmux_proto::input::Rgb { r, g, b }: jetmux_proto::input::Rgb) -> Self {
+        Self { r, g, b }
     }
 }
 
@@ -390,29 +404,9 @@ pub struct Snapshot {
     pub images: Vec<Placement>,
     /// While searching: the count and the matches in view.
     pub search: Option<Matches>,
-}
-
-/// A search's results, as of a snapshot.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Matches {
-    /// All of them, screen and history, up to [`Matches::CAP`].
-    pub total: usize,
-    /// The one navigated to, by its index among all.
-    pub current: Option<usize>,
-    pub visible: Vec<Found>,
-}
-
-impl Matches {
-    /// Most matches a search keeps; at this the count is a floor.
-    pub const CAP: usize = 10_000;
-}
-
-/// A match in the viewport.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Found {
-    pub row: u16,
-    pub cols: Range<u16>,
-    pub current: bool,
+    /// The program asked for bracketed paste, so pasted newlines don't
+    /// run anything.
+    pub bracketed_paste: bool,
 }
 
 /// A Kitty graphics image's pixels, shared by every snapshot showing it.
@@ -463,6 +457,36 @@ fn url_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || "-._~:/?#[]@!$&'()*+,;=%".contains(c)
 }
 
+/// A logical line's text, for matching against.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LineText {
+    pub text: String,
+    /// The byte the asked-for cell is.
+    pub at: usize,
+    /// Where each character starts in `text`, and its cell.
+    spots: Vec<(usize, u16, u16)>,
+}
+
+impl LineText {
+    /// The cells bytes `range` of the text cover, as column runs per row.
+    pub fn cells(&self, range: Range<usize>) -> Vec<(u16, Range<u16>)> {
+        let inside = self.spots.iter().filter(|(at, ..)| range.contains(at));
+        runs(inside.map(|&(_, row, col)| (row, col)))
+    }
+}
+
+/// Consecutive cells as `(row, columns)` runs.
+fn runs(cells: impl Iterator<Item = (u16, u16)>) -> Vec<(u16, Range<u16>)> {
+    let mut out: Vec<(u16, Range<u16>)> = Vec::new();
+    for (row, col) in cells {
+        match out.last_mut() {
+            Some((r, cols)) if *r == row => cols.end = col + 1,
+            _ => out.push((row, col..col + 1)),
+        }
+    }
+    out
+}
+
 impl Snapshot {
     /// The http(s) URL at cell `(x, y)`, following soft wraps. Trailing
     /// punctuation and unbalanced closing brackets aren't part of it, so a
@@ -478,35 +502,7 @@ impl Snapshot {
                 cells: vec![(y, cells.clone())],
             });
         }
-        let y = usize::from(y);
-        let wrapped = |row: usize| self.lines.get(row).is_some_and(|l| l.wrapped);
-        let mut top = y;
-        while top > 0 && wrapped(top - 1) {
-            top -= 1;
-        }
-        let mut bottom = y;
-        while wrapped(bottom) && bottom + 1 < self.lines.len() {
-            bottom += 1;
-        }
-        // The logical line's characters and where each is; anything not a
-        // lone ASCII character can't be in a URL.
-        let mut chars: Vec<(u16, u16, char)> = Vec::new();
-        for row in top..=bottom {
-            let line = self.lines.get(row)?;
-            for (col, cell) in line.cells.iter().enumerate() {
-                if cell.width == Width::Spacer {
-                    continue;
-                }
-                let mut text = line.cell_text(col).chars();
-                let c = match (text.next(), text.next()) {
-                    (Some(c), None) => c,
-                    _ => ' ',
-                };
-                let (row, col) = (u16::try_from(row).ok()?, u16::try_from(col).ok()?);
-                chars.push((row, col, c));
-            }
-        }
-        let y = u16::try_from(y).ok()?;
+        let chars = self.logical_chars(y)?;
         let at = chars.iter().position(|&(r, c, _)| r == y && c == x)?;
         let in_url = |i: usize| chars.get(i).is_some_and(|&(_, _, c)| url_char(c));
         if !in_url(at) {
@@ -546,14 +542,60 @@ impl Snapshot {
         if url.len() <= scheme || rel >= begin + url.len() {
             return None;
         }
-        let mut cells: Vec<(u16, Range<u16>)> = Vec::new();
-        for &(row, col, _) in chars.get(start + begin..start + begin + url.len())? {
-            match cells.last_mut() {
-                Some((r, cols)) if *r == row => cols.end = col + 1,
-                _ => cells.push((row, col..col + 1)),
+        let spots = chars.get(start + begin..start + begin + url.len())?;
+        let cells = runs(spots.iter().map(|&(row, col, _)| (row, col)));
+        Some(Link { url, cells })
+    }
+
+    /// The logical line through row `y` (soft wraps followed) as text, and
+    /// which byte of it cell `(x, y)` is.
+    pub fn line_text(&self, x: u16, y: u16) -> Option<LineText> {
+        let chars = self.logical_chars(y)?;
+        let (mut text, mut spots, mut at) = (String::new(), Vec::new(), None);
+        for (row, col, c) in chars {
+            if (row, col) == (y, x) {
+                at = Some(text.len());
+            }
+            spots.push((text.len(), row, col));
+            text.push(c);
+        }
+        Some(LineText {
+            text,
+            at: at?,
+            spots,
+        })
+    }
+
+    /// Each cell of the logical line through row `y`, in order, with its
+    /// character: wide characters' spacers skipped, clusters as a space.
+    fn logical_chars(&self, y: u16) -> Option<Vec<(u16, u16, char)>> {
+        let y = usize::from(y);
+        let wrapped = |row: usize| self.lines.get(row).is_some_and(|l| l.wrapped);
+        let mut top = y;
+        while top > 0 && wrapped(top - 1) {
+            top -= 1;
+        }
+        let mut bottom = y;
+        while wrapped(bottom) && bottom + 1 < self.lines.len() {
+            bottom += 1;
+        }
+        let mut chars = Vec::new();
+        for row in top..=bottom {
+            let line = self.lines.get(row)?;
+            for (col, cell) in line.cells.iter().enumerate() {
+                if cell.width == Width::Spacer {
+                    continue;
+                }
+                let mut text = line.cell_text(col).chars();
+                let c = match (text.next(), text.next()) {
+                    (Some(c), None) => c,
+                    _ => ' ',
+                };
+                let (row, col) = (u16::try_from(row).ok()?, u16::try_from(col).ok()?);
+                chars.push((row, col, c));
             }
         }
-        Some(Link { url, cells })
+        Some(chars)
     }
 
     /// All lines as text, one per row, trailing blank rows trimmed.

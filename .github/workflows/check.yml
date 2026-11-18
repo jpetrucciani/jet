@@ -23,6 +23,17 @@ jobs:
           key: linux
       - run: nix-shell --run check
 
+  web:
+    name: web UI (types in sync, typecheck, build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: web
+      - run: nix-shell --run check_web
+
   windows:
     name: windows (cross-compile, clippy)
     runs-on: ubuntu-latest

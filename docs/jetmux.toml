@@ -1,0 +1,165 @@
+# jetmux config: every option, with its default where it has one.
+#
+# Lives at $JETMUX_CONFIG, else $XDG_CONFIG_HOME/jetmux/config.toml, else
+# ~/.config/jetmux/config.toml. A missing file means all defaults. The
+# client, daemon, jetmux-web and jetmux-notify all reread it when it changes;
+# an error shows in the status bar and the old config stays in effect.
+#
+# jet's config (docs/config.toml) is read first, if there is one: its
+# [jetmux] table holds these same keys, and its [theme], [colors] and
+# [status] sections are shared (below). This file goes on top and wins, so
+# everything can live in jet's file, in this one, or split between them.
+
+# The prefix key; "none" for no prefix (bindings only).
+prefix = "C-b"
+
+# ---------------------------------------------------------------------------
+# Keys: per layer, a key to a command name, or "none" to unbind.
+# Keys: a char ("%"), C-x, M-x, or Enter Tab BTab BSpace Esc Space Up Down
+# Left Right Home End PageUp PageDown Insert Delete.
+#
+# Commands: new-tab close-tab next-tab prev-tab rename-tab move-tab-left
+# move-tab-right select-tab-1..9 split-right split-down split-left split-up
+# close-pane zoom focus-next focus-prev focus-left focus-right focus-up
+# focus-down swap-left swap-right swap-up swap-down resize-left resize-right
+# resize-up resize-down rotate copy-mode search search-up paste pane-mode
+# tab-mode detach send-prefix palette leave
+# Copy mode also: copy-left copy-right copy-up copy-down copy-select
+# copy-select-line copy-select-block copy-yank copy-exit search-next
+# search-prev copy-prev-prompt copy-next-prompt copy-prev-failure
+# copy-yank-output
+#
+# Defaults: after the prefix, d detach, c new tab, n/N next/prev tab, 1-9 go
+# to tab, % or | split right, " or - split down, h j k l focus, H J K L
+# resize, x close pane, & close tab, z zoom, o next pane, { } rotate, ,
+# rename tab, [ copy mode, ] paste, p pane mode, t tab mode, : palette.
+# Without prefix: M-h/j/k/l focus, M-1..9 go to tab.
+# Copy mode: vi motions, v V C-v select, y yank, / ? n N search, { } prev
+# and next prompt, F last failed command, Y copy a command's output, q quit.
+
+[keys.normal]
+# "M-t" = "new-tab"
+
+[keys.prefix]
+# "s" = "split-down"
+# "x" = "none"
+
+[keys.pane]
+[keys.tab]
+[keys.copy]
+
+# ---------------------------------------------------------------------------
+# Status bar. Colors: a 256-color index, "#rrggbb", or "default" for the
+# terminal's own. Unset colors keep these defaults.
+
+[bar]
+style = "plain"          # "powerline" adds arrows; needs a Powerline/Nerd font
+# bar = 236              # bar background
+# text = 250
+# muted = 244            # hint labels, help note
+# key = 214              # hint keys
+# session = 214          # session name background
+# badge_text = 235       # text on the session and mode badges
+# active = 239           # active tab background
+# active_text = 231
+# prefix = 214           # mode badges
+# pane = 114
+# tab = 75
+# copy = 176
+
+# ---------------------------------------------------------------------------
+# Shared with jet, as in docs/config.toml: [theme] and [colors] are the
+# colors apps see when they ask (while no jet client sent its own) and the
+# web UI draws in; [[status.segments]] show in the bar, left ones after the
+# tabs and right ones at the end. Fields jetmux can't know ({ssh},
+# {process}, {profile}) stay empty, which hides their segments.
+
+[theme]
+# name = "Poimandres"
+
+[colors]
+# background = "#1b1e28"
+
+# [[status.segments]]
+# text = "{dir}"
+# align = "left"
+
+# ---------------------------------------------------------------------------
+# Hooks: shell commands run on events, with JETMUX_EVENT, JETMUX_EVENT_SESSION,
+# JETMUX_EVENT_PANE, JETMUX_EVENT_JSON and, where they apply, JETMUX_EVENT_TITLE,
+# JETMUX_EVENT_BODY, JETMUX_EVENT_COMMAND, JETMUX_EVENT_EXIT,
+# JETMUX_EVENT_DURATION_MS.
+
+[on]
+# session_created = "..."
+# session_exited = "..."
+# pane_exited = "..."
+# bell = "..."
+# title_changed = "..."
+# block_done = 'test "$JETMUX_EVENT_EXIT" = 0 || echo "$JETMUX_EVENT_COMMAND failed" >> ~/failures.log'
+# notify = "..."
+
+# ---------------------------------------------------------------------------
+# Snapshots for `jetmux restore` after a reboot. Off unless interval is set;
+# also taken at shutdown (SIGTERM) and with `jetmux snapshot`.
+
+[persist]
+# interval = 300
+# Commands safe to run again on restore, by leading words. Everything else
+# comes back as a shell in the old directory with the command typed, not run.
+rerun = ["htop", "btop", "top", "watch", "tail -f", "journalctl -f"]
+
+# ---------------------------------------------------------------------------
+# Profiles: `jetmux up NAME` starts (or attaches to) a session laid out like
+# this. Commands declared here are rerun on restore.
+
+[profile.dev]
+cwd = "~/src/jetmux"
+env = { RUST_LOG = "info" }
+# Extra web UI key bar rows and one-tap snippets for this profile's session.
+keybar = [["C-c", "C-d", "Up", "Enter"]]
+actions = [{ name = "test", send = "cargo test\r" }]
+
+[[profile.dev.tab]]
+name = "edit"
+cmd = "nvim"
+
+[[profile.dev.tab]]
+name = "run"
+split = "vertical"        # panes side by side; "horizontal" stacks them
+panes = [
+  { cmd = "cargo watch -x test", weight = 2 },
+  { split = "horizontal", panes = [{}, { cwd = "crates" }] },  # {} is a shell
+]
+
+# ---------------------------------------------------------------------------
+# jetmux-web: the browser and phone client. Publish it on your tailnet with
+# `tailscale serve --bg 7681`.
+
+[web]
+listen = "127.0.0.1:7681"
+# url = "https://jetmux.your-tailnet.ts.net"   # for share links
+# Role for requests without a tailnet identity, i.e. from this machine.
+# Unset refuses them. Anyone able to reach localhost gets this role.
+# local = "owner"
+# Key bar rows under the built-in one (Esc Ctrl Alt Tab arrows | ~ - /).
+keybar = []
+actions = []
+# jetmux = "/path/to/jetmux"   # used to launch profiles; default: next to jetmux-web
+
+# Tailnet logins to roles: owner (everything), pair (type, act), viewer
+# (watch). "*" is anyone else on the tailnet.
+[web.users]
+# "you@github" = "owner"
+# "*" = "viewer"
+
+# ---------------------------------------------------------------------------
+# jetmux-notify: alerts for apps' notifications (OSC 9/777) and slow commands.
+
+[notify]
+long_command = 10        # seconds; 0 turns these off
+bell = false
+desktop = true           # notify-send, or osascript on macOS
+# webhook = "https://ntfy.sh/your-topic"   # POSTs the message, title in a header
+push = true              # web push to browsers that enabled it in jetmux-web
+subject = "mailto:jetmux@localhost"

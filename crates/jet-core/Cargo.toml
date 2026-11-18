@@ -5,9 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-jet-pty.workspace = true
+jetmux-proto = { path = "../jetmux-proto" }
 libghostty-vt.workspace = true
 png.workspace = true
+regex.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true

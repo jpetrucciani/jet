@@ -1,0 +1,28 @@
+[package]
+name = "jetmux-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+jetmux-client = { version = "0.1.0", path = "../jetmux-client" }
+jet-config.workspace = true
+jet-core.workspace = true
+jetmux-notify = { version = "0.1.0", path = "../jetmux-notify" }
+jetmux-proto = { version = "0.1.0", path = "../jetmux-proto" }
+axum = { version = "0.8.9", features = ["ws"] }
+hmac = "0.13.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "sync", "process"] }
+toml = "1.2.1"
+ts-rs = { version = "12.0.1", optional = true }
+
+[lints]
+workspace = true
+
+[features]
+# Derive TypeScript types for the web UI (`jetmux_ts` regenerates them).
+ts = ["dep:ts-rs", "jetmux-proto/ts"]

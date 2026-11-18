@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  jet's Windows installer, built by dist_win with msitools' wixl. Per-user:
+  no admin, installed to %LOCALAPPDATA%\Programs\jet, on the user's PATH,
+  with a Start Menu shortcut. A newer version replaces an older one (the
+  UpgradeCode never changes). Config in %APPDATA%\jet is left alone.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*" Name="jet" Language="1033" Version="$(var.Version)"
+           Manufacturer="jet" UpgradeCode="855AC7C1-2D9B-4F3C-A6B5-5D53B98D1376">
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser"
+             Description="jet terminal" Comments="jet $(var.Version)"/>
+    <MajorUpgrade DowngradeErrorMessage="A newer jet is already installed."/>
+    <Media Id="1" Cabinet="jet.cab" EmbedCab="yes"/>
+    <Icon Id="jet.ico" SourceFile="$(var.Icon)"/>
+    <Property Id="ARPPRODUCTICON" Value="jet.ico"/>
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="LocalAppDataFolder">
+        <Directory Id="ProgramsDir" Name="Programs">
+          <Directory Id="INSTALLDIR" Name="jet">
+            <Component Id="Files" Guid="B5D10F84-16E8-4428-8294-2B991E204901">
+              <RegistryValue Root="HKCU" Key="Software\jet" Name="InstallDir"
+                             Type="string" Value="[INSTALLDIR]" KeyPath="yes"/>
+              <File Id="jet.exe" Source="$(var.Stage)/jet.exe"/>
+              <File Id="jet_cli.exe" Source="$(var.Stage)/jet-cli.exe"/>
+              <!-- A newer ConPTY than Windows ships; must sit beside jet.exe. -->
+              <File Id="conpty.dll" Source="$(var.Stage)/conpty.dll"/>
+              <File Id="OpenConsole.exe" Source="$(var.Stage)/OpenConsole.exe"/>
+              <File Id="LICENSE" Source="$(var.Stage)/LICENSE"/>
+              <File Id="LICENSE_conpty" Source="$(var.Stage)/LICENSE-conpty"/>
+              <File Id="NOTICES" Source="$(var.Stage)/THIRD-PARTY-NOTICES"/>
+              <Environment Id="PATH" Name="PATH" Value="[INSTALLDIR]" Action="set"
+                           Part="last" System="no" Permanent="no"/>
+              <RemoveFolder Id="RemoveInstallDir" On="uninstall"/>
+            </Component>
+          </Directory>
+        </Directory>
+      </Directory>
+      <Directory Id="ProgramMenuFolder">
+        <Component Id="StartMenu" Guid="D29E8492-6B31-40D8-8AF7-54FD26DFA509">
+          <Shortcut Id="jet" Name="jet" Target="[INSTALLDIR]jet.exe"
+                    WorkingDirectory="INSTALLDIR" Icon="jet.ico"/>
+          <RegistryValue Root="HKCU" Key="Software\jet" Name="StartMenu"
+                         Type="integer" Value="1" KeyPath="yes"/>
+        </Component>
+      </Directory>
+    </Directory>
+
+    <!-- On removal (uninstall, or an upgrade replacing this version): drop
+         quake's sign-in entry and quit it, so nothing points at or holds
+         the files. A jet window run after an upgrade adds the entry back. -->
+    <CustomAction Id="QuakeUninstall" FileKey="jet.exe" ExeCommand="quake --uninstall"
+                  Execute="immediate" Return="ignore"/>
+    <InstallExecuteSequence>
+      <Custom Action="QuakeUninstall" Before="InstallInitialize">REMOVE="ALL"</Custom>
+    </InstallExecuteSequence>
+
+    <Feature Id="jet" Level="1">
+      <ComponentRef Id="Files"/>
+      <ComponentRef Id="StartMenu"/>
+    </Feature>
+  </Product>
+</Wix>

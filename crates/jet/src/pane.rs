@@ -22,11 +22,10 @@ use std::time::{Duration, Instant};
 
 use jet_pty::{Child, Command, Pty, Size};
 
-use crate::Error;
-use crate::osc::{Notification, Progress};
-use crate::snapshot::{Snapshot, SnapshotSlot};
-use crate::vt::Location;
-use crate::vt::{KeyInput, MouseInput, MouseOutcome, VtCore, VtSettings};
+use jet_core::{
+    Context, Error, Grabbed, KeyInput, Location, MouseInput, MouseOutcome, Notification,
+    PointerShape, Progress, Snapshot, SnapshotSlot, VtCore, VtSettings,
+};
 
 /// Stop draining queued output after this much so effects (replies to the
 /// child, titles) keep flowing during floods like `cat bigfile`.
@@ -45,7 +44,8 @@ const SYNC_TIMEOUT: Duration = Duration::from_secs(1);
 pub struct PaneOptions {
     pub command: Command,
     pub size: Size,
-    pub max_scrollback: usize,
+    /// Lines of history.
+    pub scrollback: usize,
     pub settings: VtSettings,
 }
 
@@ -57,7 +57,8 @@ pub enum PaneEvent {
     Cwd(PathBuf),
     /// Where the shell says it is, local or not: what to show, rather than
     /// where to open new shells.
-    Location(Location),
+    /// `None` once it's unknown (a jetmux pane with ssh in front).
+    Location(Option<Location>),
     /// A user variable set (OSC 1337 SetUserVar); empty unsets it.
     UserVar(String, String),
     /// A progress report (OSC 9;4), for the taskbar.
@@ -66,6 +67,10 @@ pub enum PaneEvent {
     Notify(Notification),
     /// A command finished (OSC 133;D), with its exit status if given.
     CommandFinished(Option<i32>),
+    /// The mouse pointer a program wants over the pane (OSC 22).
+    Pointer(PointerShape),
+    /// The innermost context changed (OSC 3008); `None`: none is open.
+    Context(Option<Context>),
     Bell,
     /// Put this text on the clipboard: a selection, or a program's OSC 52.
     Copy(String),
@@ -77,7 +82,7 @@ pub enum PaneEvent {
     Failed(String),
 }
 
-enum Msg {
+pub(crate) enum Msg {
     Output(Vec<u8>),
     Exited(Option<u32>),
     Input(Vec<u8>),
@@ -94,7 +99,9 @@ enum Msg {
     Copy,
     JumpToPrompt(isize),
     CopyCommandOutput,
-    Search(String),
+    CopyMode,
+    QuickSelect,
+    Search(String, bool),
     SearchStep(isize),
     AutoscrollTick,
     Resize(Size),
@@ -105,6 +112,18 @@ enum Msg {
 }
 
 pub struct Pane {
+    backend: Backend,
+    program: String,
+}
+
+enum Backend {
+    Local(Local),
+    /// A jetmux daemon's pane.
+    Remote(crate::remote::Link),
+}
+
+/// A child on a PTY here, and its pane thread.
+struct Local {
     tx: Sender<Msg>,
     snapshots: SnapshotSlot,
     events: Receiver<PaneEvent>,
@@ -119,6 +138,11 @@ impl Pane {
     pub fn spawn(opts: PaneOptions, wake: impl Fn() + Send + 'static) -> Result<Self, Error> {
         let (pty, child, reader, writer) = Pty::spawn(&opts.command, opts.size)?;
         let pid = pty.pid();
+        let program = opts.command.program.as_ref().map(std::path::Path::new);
+        let program = program
+            .and_then(std::path::Path::file_stem)
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let (tx, rx) = mpsc::channel();
         let (event_tx, events) = mpsc::channel();
         let snapshots = SnapshotSlot::default();
@@ -137,13 +161,12 @@ impl Pane {
             .spawn(move || {
                 let size = opts.size;
                 // The cell size too: mouse positions map to cells with it.
-                let vt =
-                    VtCore::new(size.cols, size.rows, opts.max_scrollback).and_then(|mut vt| {
-                        let (cw, ch) = (u32::from(size.cell_width), u32::from(size.cell_height));
-                        vt.resize(size.cols, size.rows, cw, ch)?;
-                        vt.configure(&opts.settings)?;
-                        Ok(vt)
-                    });
+                let vt = VtCore::new(size.cols, size.rows, opts.scrollback).and_then(|mut vt| {
+                    let (cw, ch) = (u32::from(size.cell_width), u32::from(size.cell_height));
+                    vt.resize(size.cols, size.rows, cw, ch)?;
+                    vt.configure(&opts.settings)?;
+                    Ok(vt)
+                });
                 let vt = match vt {
                     Ok(vt) => {
                         let _ = ready_tx.send(Ok(()));
@@ -176,37 +199,71 @@ impl Pane {
         ready_rx.recv().map_err(|_| Error::Closed)??;
 
         Ok(Self {
-            tx,
-            snapshots,
-            events,
-            thread: Some(thread),
-            pid,
+            backend: Backend::Local(Local {
+                tx,
+                snapshots,
+                events,
+                thread: Some(thread),
+                pid,
+            }),
+            program,
         })
     }
 
+    /// A jetmux daemon's pane.
+    pub(crate) fn remote(link: crate::remote::Link) -> Self {
+        Self {
+            backend: Backend::Remote(link),
+            program: "jetmux".into(),
+        }
+    }
+
+    pub(crate) fn is_remote(&self) -> bool {
+        matches!(self.backend, Backend::Remote(_))
+    }
+
+    fn send(&self, msg: Msg) {
+        match &self.backend {
+            // A send error means the pane thread is gone; it already
+            // reported why.
+            Backend::Local(local) => {
+                let _ = local.tx.send(msg);
+            }
+            Backend::Remote(link) => link.send(msg),
+        }
+    }
+
+    /// What was run, without its directory or extension (`pwsh`); empty
+    /// for the login shell.
+    pub fn program(&self) -> &str {
+        &self.program
+    }
+
     pub fn pid(&self) -> Option<u32> {
-        self.pid
+        match &self.backend {
+            Backend::Local(local) => local.pid,
+            Backend::Remote(_) => None,
+        }
     }
 
     /// Bytes to send to the child as typed input.
     pub fn input(&self, bytes: impl Into<Vec<u8>>) {
-        // A send error means the pane thread is gone; it already reported why.
-        let _ = self.tx.send(Msg::Input(bytes.into()));
+        self.send(Msg::Input(bytes.into()));
     }
 
     /// A key event, encoded on the pane thread against the current modes.
     pub fn key(&self, input: KeyInput) {
-        let _ = self.tx.send(Msg::Key(input));
+        self.send(Msg::Key(input));
     }
 
     /// Text from the clipboard; bracketed if the app enabled that.
     pub fn paste(&self, text: String) {
-        let _ = self.tx.send(Msg::Paste(text));
+        self.send(Msg::Paste(text));
     }
 
     /// Mouse wheel over cell `(col, row)`; `notches` is negative going up.
     pub fn wheel(&self, notches: i32, cell: (u16, u16), mods: libghostty_vt::key::Mods) {
-        let _ = self.tx.send(Msg::Wheel {
+        self.send(Msg::Wheel {
             notches,
             cell,
             mods,
@@ -215,73 +272,93 @@ impl Pane {
 
     /// A mouse button or move; see [`VtCore::mouse`].
     pub fn mouse(&self, input: MouseInput) {
-        let _ = self.tx.send(Msg::Mouse(input));
+        self.send(Msg::Mouse(input));
     }
 
     /// The window gained or lost focus.
     pub fn focus(&self, focused: bool) {
-        let _ = self.tx.send(Msg::Focus(focused));
+        self.send(Msg::Focus(focused));
     }
 
     /// New colors, cursor or selection behavior.
     pub fn configure(&self, settings: VtSettings) {
-        let _ = self.tx.send(Msg::Configure(settings));
+        self.send(Msg::Configure(settings));
     }
 
     /// Scroll to the `n`th prompt up (negative) or down; see
     /// [`VtCore::jump_to_prompt`].
     pub fn jump_to_prompt(&self, n: isize) {
-        let _ = self.tx.send(Msg::JumpToPrompt(n));
+        self.send(Msg::JumpToPrompt(n));
     }
 
     /// Copy the last command's output (OSC 133), if any: arrives as
     /// [`PaneEvent::Copy`].
     pub fn copy_command_output(&self) {
-        let _ = self.tx.send(Msg::CopyCommandOutput);
+        self.send(Msg::CopyCommandOutput);
+    }
+
+    /// Toggle copy mode: keys walk and select; see [`VtCore::copy_mode`].
+    /// Copied text arrives as [`PaneEvent::Copy`].
+    pub fn copy_mode(&self) {
+        self.send(Msg::CopyMode);
+    }
+
+    /// Toggle quick select: labels on what's worth copying in view; see
+    /// [`VtCore::quick_select`]. The pick arrives as [`PaneEvent::Copy`].
+    pub fn quick_select(&self) {
+        self.send(Msg::QuickSelect);
     }
 
     /// Search the screen and history; results come in snapshots. Empty
     /// ends the search. See [`VtCore::search`].
-    pub fn search(&self, query: String) {
-        let _ = self.tx.send(Msg::Search(query));
+    pub fn search(&self, query: String, regex: bool) {
+        self.send(Msg::Search(query, regex));
     }
 
     /// Go to the `n`th match up (negative, older output) or down.
     pub fn search_step(&self, n: isize) {
-        let _ = self.tx.send(Msg::SearchStep(n));
+        self.send(Msg::SearchStep(n));
     }
 
     /// Copy the selection, if any: arrives as [`PaneEvent::Copy`].
     pub fn copy(&self) {
-        let _ = self.tx.send(Msg::Copy);
+        self.send(Msg::Copy);
     }
 
     /// Sent periodically while a selection drag is held past the top or
     /// bottom edge; scrolls and extends the selection.
     pub fn autoscroll_tick(&self) {
-        let _ = self.tx.send(Msg::AutoscrollTick);
+        self.send(Msg::AutoscrollTick);
     }
 
     pub fn resize(&self, size: Size) {
-        let _ = self.tx.send(Msg::Resize(size));
+        self.send(Msg::Resize(size));
     }
 
     /// The newest snapshot since the last call, if any. Its `dirty` rows are
     /// relative to the previous snapshot taken.
     pub fn take_snapshot(&self) -> Option<Snapshot> {
-        let snapshot = self.snapshots.take();
-        if snapshot.is_some() {
-            let _ = self.tx.send(Msg::SnapshotTaken);
+        match &self.backend {
+            Backend::Local(local) => {
+                let snapshot = local.snapshots.take();
+                if snapshot.is_some() {
+                    self.send(Msg::SnapshotTaken);
+                }
+                snapshot
+            }
+            Backend::Remote(link) => link.take_snapshot(),
         }
-        snapshot
     }
 
     pub fn try_event(&self) -> Option<PaneEvent> {
-        self.events.try_recv().ok()
+        match &self.backend {
+            Backend::Local(local) => local.events.try_recv().ok(),
+            Backend::Remote(link) => link.try_event(),
+        }
     }
 }
 
-impl Drop for Pane {
+impl Drop for Local {
     fn drop(&mut self) {
         let _ = self.tx.send(Msg::Shutdown);
         if let Some(thread) = self.thread.take() {
@@ -395,6 +472,9 @@ impl PaneThread {
     }
 
     fn run(&mut self) -> Result<(), Error> {
+        // The empty screen, at once: the window's first frame needs a
+        // snapshot, and the shell may take a while to say anything.
+        self.flush()?;
         while let Some(mut msg) = self.next()? {
             let mut budget = MAX_BYTES_PER_FLUSH;
             loop {
@@ -407,10 +487,19 @@ impl PaneThread {
                     }
                     Msg::Exited(code) => self.child_exited(code),
                     Msg::Input(bytes) => self.send_to_pty(bytes),
-                    Msg::Key(input) => {
-                        let bytes = self.vt.encode_key(&input)?;
-                        self.send_to_pty(bytes);
-                    }
+                    Msg::Key(input) => match self.vt.mode_key(&input)? {
+                        None => {
+                            let bytes = self.vt.encode_key(&input)?;
+                            self.send_to_pty(bytes);
+                        }
+                        Some(Grabbed::Nothing) => {}
+                        Some(Grabbed::Copy(text)) => self.event(PaneEvent::Copy(text)),
+                        Some(Grabbed::CopyAndPaste(text)) => {
+                            let bytes = self.vt.encode_paste(&text)?;
+                            self.send_to_pty(bytes);
+                            self.event(PaneEvent::Copy(text));
+                        }
+                    },
                     Msg::Paste(text) => {
                         let bytes = self.vt.encode_paste(&text)?;
                         self.send_to_pty(bytes);
@@ -435,7 +524,9 @@ impl PaneThread {
                     }
                     Msg::Configure(settings) => self.vt.configure(&settings)?,
                     Msg::JumpToPrompt(n) => self.vt.jump_to_prompt(n)?,
-                    Msg::Search(query) => self.vt.search(&query)?,
+                    Msg::CopyMode => self.vt.copy_mode()?,
+                    Msg::QuickSelect => self.vt.quick_select()?,
+                    Msg::Search(query, regex) => self.vt.search(&query, regex)?,
                     Msg::SearchStep(n) => self.vt.search_step(n)?,
                     Msg::CopyCommandOutput => {
                         if let Some(text) = self.vt.last_command_output()? {
@@ -496,7 +587,10 @@ impl PaneThread {
             notify |= self.event_tx.send(PaneEvent::Cwd(cwd)).is_ok();
         }
         if let Some(location) = effects.location {
-            notify |= self.event_tx.send(PaneEvent::Location(location)).is_ok();
+            notify |= self
+                .event_tx
+                .send(PaneEvent::Location(Some(location)))
+                .is_ok();
         }
         for (name, value) in effects.vars {
             notify |= self.event_tx.send(PaneEvent::UserVar(name, value)).is_ok();
@@ -512,6 +606,12 @@ impl PaneThread {
         }
         for notification in effects.notifications {
             notify |= self.event_tx.send(PaneEvent::Notify(notification)).is_ok();
+        }
+        if let Some(shape) = effects.pointer {
+            notify |= self.event_tx.send(PaneEvent::Pointer(shape)).is_ok();
+        }
+        if let Some(context) = effects.context {
+            notify |= self.event_tx.send(PaneEvent::Context(context)).is_ok();
         }
         for status in effects.finished {
             notify |= self
@@ -590,5 +690,201 @@ mod tests {
         assert!(!sync.hold(true, start + SYNC_TIMEOUT));
         assert_eq!(sync.deadline(), None);
         assert!(!sync.hold(true, start + 2 * SYNC_TIMEOUT));
+    }
+
+    /// Real children on a real PTY; they run bash, cat and sleep.
+    #[cfg(unix)]
+    mod pty {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        use jet_core::{Mods, MouseAction, MouseButton, MouseInput, VtSettings};
+        use jet_pty::{Command, Size};
+
+        use crate::pane::{Pane, PaneEvent, PaneOptions};
+
+        const TIMEOUT: Duration = Duration::from_secs(10);
+
+        /// Waits on pane wakeups until `done` holds for the latest screen text and
+        /// the events seen so far.
+        fn wait_for(
+            pane: &Pane,
+            wakes: &mpsc::Receiver<()>,
+            text: &mut String,
+            events: &mut Vec<PaneEvent>,
+            done: impl Fn(&str, &[PaneEvent]) -> bool,
+        ) -> bool {
+            let deadline = Instant::now() + TIMEOUT;
+            loop {
+                if let Some(snapshot) = pane.take_snapshot() {
+                    *text = snapshot.text();
+                }
+                events.extend(std::iter::from_fn(|| pane.try_event()));
+                if done(text, events) {
+                    return true;
+                }
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() || wakes.recv_timeout(left).is_err() {
+                    return false;
+                }
+            }
+        }
+
+        #[test]
+        fn bash_round_trips_through_the_pty() -> Result<(), jet_core::Error> {
+            let command = Command::new("bash").arg("-c").arg(
+                r#"printf '\033]2;jet-test\007ready\n'; read -r line; printf 'got:%s\n' "$line"; exit 3"#,
+            );
+            let (wake_tx, wakes) = mpsc::channel();
+            let opts = PaneOptions {
+                command,
+                size: Size {
+                    cols: 40,
+                    rows: 10,
+                    cell_width: 8,
+                    cell_height: 16,
+                },
+                scrollback: 100,
+                settings: VtSettings::default(),
+            };
+            let pane = Pane::spawn(opts, move || {
+                let _ = wake_tx.send(());
+            })?;
+
+            let (mut text, mut events) = (String::new(), Vec::new());
+            assert!(
+                wait_for(&pane, &wakes, &mut text, &mut events, |t, _| t
+                    .contains("ready")),
+                "never saw ready; screen:\n{text}"
+            );
+
+            pane.input("ping\r");
+            let exited = |t: &str, e: &[PaneEvent]| {
+                t.contains("got:ping") && e.contains(&PaneEvent::Exited(Some(3)))
+            };
+            assert!(
+                wait_for(&pane, &wakes, &mut text, &mut events, exited),
+                "no round trip; screen:\n{text}\nevents: {events:?}"
+            );
+            assert!(events.contains(&PaneEvent::Title("jet-test".into())));
+            Ok(())
+        }
+
+        /// A flood larger than the reader's in-flight window comes through whole and
+        /// the pane still sees the child exit.
+        #[test]
+        fn flood_completes() -> Result<(), Box<dyn std::error::Error>> {
+            let path = std::env::temp_dir().join(format!("jet-flood-{}.txt", std::process::id()));
+            let mut flood = String::new();
+            for i in 0..20_000u32 {
+                flood.push_str(&format!("word{i} "));
+                if i % 8 == 7 {
+                    flood.push('\n');
+                }
+            }
+            flood.push_str("\nflood-end\n");
+            std::fs::write(&path, flood)?;
+
+            let command = Command::new("cat").arg(&path);
+            let (wake_tx, wakes) = mpsc::channel();
+            let opts = PaneOptions {
+                command,
+                size: Size {
+                    cols: 100,
+                    rows: 30,
+                    cell_width: 8,
+                    cell_height: 16,
+                },
+                scrollback: 1000,
+                settings: VtSettings::default(),
+            };
+            let pane = Pane::spawn(opts, move || {
+                let _ = wake_tx.send(());
+            })?;
+            let (mut text, mut events) = (String::new(), Vec::new());
+            let done = wait_for(&pane, &wakes, &mut text, &mut events, |t, e| {
+                t.contains("flood-end") && e.contains(&PaneEvent::Exited(Some(0)))
+            });
+            let _ = std::fs::remove_file(&path);
+            assert!(done, "flood stalled; screen:\n{text}\nevents: {events:?}");
+            Ok(())
+        }
+
+        /// Mouse positions map to cells using the cell size the pane was spawned
+        /// with, before any resize: a double click on the top row picks its word.
+        #[test]
+        fn clicks_use_the_spawn_cell_size() -> Result<(), jet_core::Error> {
+            let command = Command::new("bash")
+                .arg("-c")
+                .arg("printf 'top\\n\\nbottom'; sleep 10");
+            let (wake_tx, wakes) = mpsc::channel();
+            let opts = PaneOptions {
+                command,
+                size: Size {
+                    cols: 20,
+                    rows: 5,
+                    cell_width: 10,
+                    cell_height: 20,
+                },
+                scrollback: 0,
+                settings: VtSettings::default(),
+            };
+            let pane = Pane::spawn(opts, move || {
+                let _ = wake_tx.send(());
+            })?;
+            let (mut text, mut events) = (String::new(), Vec::new());
+            assert!(
+                wait_for(&pane, &wakes, &mut text, &mut events, |t, _| t
+                    .contains("bottom")),
+                "never saw output; screen:\n{text}"
+            );
+            // Row 0, column 1, in pixels.
+            let click = |action| MouseInput {
+                action,
+                x: 15.0,
+                y: 10.0,
+                mods: Mods::empty(),
+            };
+            for _ in 0..2 {
+                pane.mouse(click(MouseAction::Press(MouseButton::Left)));
+                pane.mouse(click(MouseAction::Release(MouseButton::Left)));
+            }
+            pane.copy();
+            let copied =
+                |_: &str, e: &[PaneEvent]| e.iter().any(|e| matches!(e, PaneEvent::Copy(_)));
+            assert!(
+                wait_for(&pane, &wakes, &mut text, &mut events, copied),
+                "nothing copied; events: {events:?}"
+            );
+            assert!(
+                events.contains(&PaneEvent::Copy("top".into())),
+                "{events:?}"
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn a_quiet_shell_still_gets_a_first_frame() -> Result<(), jet_core::Error> {
+            let (wake_tx, wakes) = mpsc::channel();
+            let opts = PaneOptions {
+                command: Command::new("sleep").arg("5"),
+                size: Size {
+                    cols: 20,
+                    rows: 5,
+                    cell_width: 8,
+                    cell_height: 16,
+                },
+                scrollback: 10,
+                settings: VtSettings::default(),
+            };
+            let pane = Pane::spawn(opts, move || {
+                let _ = wake_tx.send(());
+            })?;
+            // The window's first frame waits on a snapshot; one must come without
+            // any output or input.
+            assert!(wakes.recv_timeout(TIMEOUT).is_ok());
+            assert!(pane.take_snapshot().is_some());
+            Ok(())
+        }
     }
 }

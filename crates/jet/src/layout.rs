@@ -128,6 +128,73 @@ impl Node {
         }
     }
 
+    /// Move the divider of the innermost split around `pane` that runs
+    /// across `dir` by `step` (a share of that split) toward `dir`. False
+    /// if no split around it runs that way.
+    pub fn nudge(&mut self, pane: PaneId, dir: Direction, step: f32) -> bool {
+        let Self::Split {
+            horizontal,
+            ratio,
+            first,
+            second,
+        } = self
+        else {
+            return false;
+        };
+        let child = if first.panes().contains(&pane) {
+            first
+        } else if second.panes().contains(&pane) {
+            second
+        } else {
+            return false;
+        };
+        if child.nudge(pane, dir, step) {
+            return true;
+        }
+        if matches!(dir, Direction::Left | Direction::Right) != *horizontal {
+            return false;
+        }
+        let toward = if matches!(dir, Direction::Right | Direction::Down) {
+            step
+        } else {
+            -step
+        };
+        *ratio = (*ratio + toward).clamp(0.05, 0.95);
+        true
+    }
+
+    /// Size every split so the panes side by side (or stacked) in a row of
+    /// them get the same space.
+    pub fn equalize(&mut self) {
+        if let Self::Split {
+            horizontal,
+            ratio,
+            first,
+            second,
+        } = self
+        {
+            first.equalize();
+            second.equalize();
+            let a = first.across(*horizontal) as f32;
+            let b = second.across(*horizontal) as f32;
+            *ratio = a / (a + b);
+        }
+    }
+
+    /// How many panes share the space this way: splits the other way count
+    /// as one.
+    fn across(&self, horizontal: bool) -> usize {
+        match self {
+            Self::Split {
+                horizontal: h,
+                first,
+                second,
+                ..
+            } if *h == horizontal => first.across(horizontal) + second.across(horizontal),
+            _ => 1,
+        }
+    }
+
     /// Set the ratio of the split whose divider [`Node::layout`] listed at
     /// `index`. False if there's no such split.
     pub fn set_ratio(&mut self, index: usize, ratio: f32) -> bool {
@@ -272,6 +339,45 @@ mod tests {
         };
         node.layout(area, 1, &mut panes, &mut dividers);
         (panes, dividers)
+    }
+
+    #[test]
+    fn nudging_moves_the_nearest_divider_that_way() {
+        // 1 | (2 over 3)
+        let mut tree = Node::Leaf(1);
+        tree.split(1, 2, Direction::Right);
+        tree.split(2, 3, Direction::Down);
+        let ratios = |tree: &Node| -> Vec<f32> {
+            let mut out = Vec::new();
+            fn walk(node: &Node, out: &mut Vec<f32>) {
+                if let Node::Split {
+                    ratio,
+                    first,
+                    second,
+                    ..
+                } = node
+                {
+                    out.push((ratio * 100.0).round() / 100.0);
+                    walk(first, out);
+                    walk(second, out);
+                }
+            }
+            walk(tree, &mut out);
+            out
+        };
+        // Pane 3 going up moves its own divider; going left, the outer one.
+        assert!(tree.nudge(3, Direction::Up, 0.1));
+        assert!(tree.nudge(3, Direction::Left, 0.1));
+        assert_eq!(ratios(&tree), [0.4, 0.4]);
+        // Pane 1 has nothing above or below it.
+        assert!(!tree.nudge(1, Direction::Up, 0.1));
+        assert!(!tree.nudge(9, Direction::Left, 0.1));
+        // Three side by side get a third each.
+        tree.split(1, 4, Direction::Left);
+        tree.equalize();
+        let (panes, _) = layout(&tree);
+        let widths: Vec<i32> = panes.iter().map(|(_, r)| r.w).collect();
+        assert_eq!(widths, [33, 33, 33, 33]);
     }
 
     #[test]

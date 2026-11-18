@@ -1,0 +1,27 @@
+[package]
+name = "jetmux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+jetmux-client = { version = "0.1.0", path = "../jetmux-client" }
+jet-config.workspace = true
+jet-core.workspace = true
+jetmux-core = { version = "0.1.0", path = "../jetmux-core" }
+jetmux-proto = { version = "0.1.0", path = "../jetmux-proto" }
+jetmux-render = { version = "0.1.0", path = "../jetmux-render" }
+jetmux-roam = { version = "0.1.0", path = "../jetmux-roam" }
+mio = { version = "1.2.4", features = ["os-poll", "os-ext", "net"] }
+regex = { version = "1.13.1", default-features = false, features = ["std", "unicode-perl", "unicode-case"] }
+rustix = { version = "1.1.6", features = ["termios", "process", "fs", "stdio", "system"] }
+libc.workspace = true
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+signal-hook = "0.4.6"
+signal-hook-mio = { version = "0.3.0", features = ["support-v1_0"] }
+toml = { version = "1.2.1", default-features = false, features = ["display", "parse", "serde"] }
+
+[lints]
+workspace = true

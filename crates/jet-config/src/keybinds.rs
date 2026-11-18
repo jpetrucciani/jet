@@ -43,6 +43,10 @@ pub enum Action {
     JumpToPrompt(isize),
     /// Copy the last command's output (OSC 133).
     CopyCommandOutput,
+    /// Select and copy with vi keys in the focused pane; toggles.
+    CopyMode,
+    /// Label the URLs, paths and hashes in view to copy one; toggles.
+    QuickSelect,
     /// Open the find bar over the focused pane.
     StartSearch,
     EndSearch,
@@ -51,9 +55,31 @@ pub enum Action {
     ToggleCommandPalette,
     /// The focused split takes the whole tab, or gives it back.
     ToggleSplitZoom,
+    /// Move the nearest divider beside the focused split that way, by a
+    /// percentage of the split.
+    ResizeSplit(Direction, u8),
+    /// Give every split in the tab equal space.
+    EqualizeSplits,
+    /// Name the tab (an empty name gives it back to the shell).
+    RenameTab,
+    /// Move the tab `n` places right (negative, left), wrapping around.
+    MoveTab(isize),
     ReloadConfig,
     /// Swallow the key.
     Ignore,
+    /// Send these bytes to the program, as if typed: `text:\r`.
+    Text(Vec<u8>),
+    /// Take the focused jetmux session's tabs out of jet, leaving it
+    /// running on its host.
+    Detach,
+    /// Put jet's and libghostty's versions on the clipboard.
+    CopyVersion,
+    /// The config file in an editor, made first if there's none.
+    OpenConfig,
+    /// A palette of the themes found, each previewed while selected.
+    ChooseTheme,
+    /// A palette of the profiles to open a tab with.
+    NewTabMenu,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,8 +132,16 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("ctrl+shift+page_up", "jump_to_prompt:-1"),
     ("ctrl+shift+page_down", "jump_to_prompt:1"),
     ("ctrl+shift+f", "start_search"),
+    ("ctrl+shift+x", "copy_mode"),
+    ("ctrl+shift+space", "quick_select"),
     ("ctrl+shift+p", "toggle_command_palette"),
     ("ctrl+shift+enter", "toggle_split_zoom"),
+    ("ctrl+shift+alt+left", "resize_split:left"),
+    ("ctrl+shift+alt+right", "resize_split:right"),
+    ("ctrl+shift+alt+up", "resize_split:up"),
+    ("ctrl+shift+alt+down", "resize_split:down"),
+    ("ctrl+shift+alt+equal", "equalize_splits"),
+    ("ctrl+shift+alt+d", "detach"),
 ];
 
 /// macOS's: Command chords, as its apps (and Ghostty) use, leaving Ctrl
@@ -145,10 +179,18 @@ pub const MAC_DEFAULTS: &[(&str, &str)] = &[
     ("cmd+up", "jump_to_prompt:-1"),
     ("cmd+down", "jump_to_prompt:1"),
     ("cmd+f", "start_search"),
+    ("cmd+shift+x", "copy_mode"),
+    ("cmd+shift+space", "quick_select"),
     ("cmd+g", "navigate_search:next"),
     ("cmd+shift+g", "navigate_search:previous"),
     ("cmd+shift+p", "toggle_command_palette"),
     ("cmd+shift+enter", "toggle_split_zoom"),
+    ("cmd+ctrl+left", "resize_split:left"),
+    ("cmd+ctrl+right", "resize_split:right"),
+    ("cmd+ctrl+up", "resize_split:up"),
+    ("cmd+ctrl+down", "resize_split:down"),
+    ("cmd+ctrl+equal", "equalize_splits"),
+    ("cmd+shift+alt+d", "detach"),
 ];
 
 /// This platform's defaults.
@@ -438,6 +480,8 @@ fn parse_action(text: &str) -> Option<Action> {
         ("decrease_font_size", arg) => Action::FontSize(-points(arg)?),
         ("reset_font_size", None) => Action::ResetFontSize,
         ("copy_command_output", None) => Action::CopyCommandOutput,
+        ("copy_mode", None) => Action::CopyMode,
+        ("quick_select", None) => Action::QuickSelect,
         ("jump_to_prompt", Some(n)) => Action::JumpToPrompt(n.parse().ok().filter(|&n| n != 0)?),
         ("start_search", None) => Action::StartSearch,
         ("end_search", None) => Action::EndSearch,
@@ -445,10 +489,66 @@ fn parse_action(text: &str) -> Option<Action> {
         ("navigate_search", Some("previous")) => Action::NavigateSearch(1),
         ("toggle_command_palette", None) => Action::ToggleCommandPalette,
         ("toggle_split_zoom", None) => Action::ToggleSplitZoom,
+        // `resize_split:left` or `resize_split:left:10` (percent).
+        ("resize_split", Some(arg)) => {
+            let (side, percent) = match arg.split_once(':') {
+                Some((side, n)) => (side, n.parse().ok().filter(|n| (1..=90).contains(n))?),
+                None => (arg, 5),
+            };
+            Action::ResizeSplit(direction(Some(side))?, percent)
+        }
+        ("equalize_splits", None) => Action::EqualizeSplits,
+        ("rename_tab", None) => Action::RenameTab,
+        ("move_tab", Some(n)) => Action::MoveTab(n.parse().ok().filter(|&n| n != 0)?),
         ("reload_config", None) => Action::ReloadConfig,
         ("ignore", None) => Action::Ignore,
+        ("text", Some(text)) => Action::Text(unescape(text)?),
+        ("detach", None) => Action::Detach,
+        ("copy_version", None) => Action::CopyVersion,
+        ("open_config", None) => Action::OpenConfig,
+        ("choose_theme", None) => Action::ChooseTheme,
+        ("new_tab_menu", None) => Action::NewTabMenu,
         _ => return None,
     })
+}
+
+/// Ghostty's `text:` escapes (Zig's): `\n \r \t \\ \" \'`, `\xHH` and
+/// `\u{H...}`, plus `\e` for Escape. `None` for a bad one.
+fn unescape(text: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            let mut buf = [0; 4];
+            out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            continue;
+        }
+        match chars.next()? {
+            'n' => out.push(b'\n'),
+            'r' => out.push(b'\r'),
+            't' => out.push(b'\t'),
+            'e' => out.push(0x1b),
+            c @ ('\\' | '"' | '\'') => out.push(u8::try_from(c).ok()?),
+            'x' => {
+                let hex: String = chars.by_ref().take(2).collect();
+                out.push(
+                    u8::from_str_radix(&hex, 16)
+                        .ok()
+                        .filter(|_| hex.len() == 2)?,
+                );
+            }
+            'u' => {
+                let rest = chars.as_str().strip_prefix('{')?;
+                let (hex, after) = rest.split_once('}')?;
+                let c = char::from_u32(u32::from_str_radix(hex, 16).ok()?)?;
+                let mut buf = [0; 4];
+                out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+                chars = after.chars();
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
 }
 
 #[cfg(test)]
@@ -459,6 +559,21 @@ mod tests {
         Action, DEFAULTS, Direction, MAC_DEFAULTS, chord_for, chord_name, find, resolve,
         resolve_over,
     };
+
+    #[test]
+    fn text_unescapes_like_ghostty() {
+        use crate::keybinds::{Action, parse_action};
+        let text = |a: &str| match parse_action(a) {
+            Some(Action::Text(bytes)) => Some(bytes),
+            _ => None,
+        };
+        assert_eq!(text(r"text:\r"), Some(b"\r".to_vec()));
+        assert_eq!(
+            text(r"text:a:b\x1b[A\u{e9}"),
+            Some("a:b\x1b[A\u{e9}".into())
+        );
+        assert_eq!(text(r"text:\q"), None);
+    }
 
     #[test]
     fn defaults_with_overrides_and_unbinds() -> Result<(), String> {

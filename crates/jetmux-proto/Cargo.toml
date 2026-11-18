@@ -1,0 +1,20 @@
+[package]
+name = "jetmux-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+postcard = { version = "1.1.3", default-features = false, features = ["use-std"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+ts-rs = { version = "12.0.1", optional = true }
+
+[lints]
+workspace = true
+
+[features]
+# Derive TypeScript types for the web UI (`jetmux_ts` regenerates them).
+ts = ["dep:ts-rs"]

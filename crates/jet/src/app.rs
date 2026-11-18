@@ -3,6 +3,7 @@
 //! (Win32, or winit on Linux and macOS) is behind [`Host`]; its backend turns native
 //! events into calls here.
 
+mod jetmux;
 #[cfg(windows)]
 pub mod win32;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -10,9 +11,9 @@ pub mod winit;
 
 use std::collections::HashMap;
 use std::error::Error;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use jet_cli::transport::{self as cli_transport, Incoming, Message};
@@ -21,21 +22,28 @@ use jet_cli::{
     Text, What,
 };
 use jet_config::keybinds::{self, Action, Binding, Direction, SplitTarget};
-use jet_config::status::StatusPosition;
-use jet_config::{Config, Decorations, Icon, TabBarPosition, TabBarShow};
+use jet_config::plumb;
+use jet_config::status::{Shown, StatusPosition, mix};
+use jet_config::{Bell, Config, Decorations, Icon, TabBarPosition, TabBarShow};
 use jet_core::{
-    Cell, CellFlags, CursorShape, Key, KeyInput, Line, Link, Location, Mods, MouseAction,
-    MouseButton, MouseInput, Pane, PaneEvent, PaneOptions, Progress, Rgb, Snapshot, Underline,
+    Cell, CellFlags, CursorShape, Key, KeyInput, Line, Location, Mods, MouseAction, MouseButton,
+    MouseInput, Occasion, Progress, Rgb, Snapshot, Underline,
 };
+
+use crate::pane::{Pane, PaneEvent, PaneOptions};
 use jet_font::Fonts;
 use jet_pty::{Command, Size};
 use jet_render::{Gpu, Grid, Image, ImageId, Quad, Renderer};
 
 use crate::chrome::{self, BUTTONS, Button, Chrome, StatusAt};
 use crate::icon;
+use crate::integration;
 use crate::layout::{self, Divider, Node, PaneId, Rect};
-use crate::overlay::{self, Command as PaletteCommand, Find, Outcome, Overlay, Palette};
-use crate::status::{self, Shown, Ssh, mix};
+use crate::overlay::{
+    self, Choice, Closing, Command as PaletteCommand, Find, Outcome, Overlay, Palette, Rename,
+};
+use crate::session::{self, Session};
+use crate::status;
 
 /// jet's title bar and window buttons, in DIPs, as Windows 11 draws its own.
 const CAPTION_DIPS: f32 = 32.0;
@@ -53,6 +61,8 @@ const LINK_MODS: Mods = if cfg!(target_os = "macos") {
     Mods::CTRL
 };
 const TRAFFIC_LIGHTS_DIPS: f32 = 76.0;
+/// jetmux tabs' icon when their profile has none: a split pane.
+pub(crate) const JETMUX_ICON: &str = r##"<svg viewBox="0 0 24 24"><g fill="none" stroke="#7f9fd0" stroke-width="2.2"><rect x="2.5" y="4" width="19" height="16" rx="2.5"/><path d="M12 4v16M12 12h9.5"/></g></svg>"##;
 const CLOSE_HOVER: Rgb = Rgb {
     r: 0xc4,
     g: 0x2b,
@@ -62,6 +72,9 @@ const CLOSE_HOVER: Rgb = Rgb {
 const CAPTION: u64 = u64::MAX - 1;
 /// How often the config file is checked for edits.
 const CONFIG_EVERY: Duration = Duration::from_secs(1);
+/// How often the session is saved, when it changed: closing the window
+/// saves it too, but logging out or a crash doesn't close it.
+const SESSION_EVERY: Duration = Duration::from_secs(10);
 /// Selection autoscroll speed while dragging past an edge.
 const AUTOSCROLL_EVERY: Duration = Duration::from_millis(40);
 /// The visual bell: a faint white wash this long, at most this often.
@@ -71,8 +84,6 @@ const BELL_GAP: Duration = Duration::from_millis(250);
 /// Renderer id of the tab bar's grid; panes count up from 1.
 const TAB_BAR: u64 = u64::MAX;
 const STATUS: u64 = u64::MAX - 2;
-/// How far panes without the keyboard fade toward their background.
-const UNFOCUSED_FADE: f32 = 0.3;
 /// Smallest size the font size keys go to, in points.
 const MIN_FONT_PT: f32 = 4.0;
 /// How far from a divider, in gaps, still grabs it.
@@ -119,6 +130,13 @@ trait Host {
     /// The quake settings changed: re-register the hotkey, re-place the
     /// window. Why the hotkey can't be had, if not.
     fn reconfigure_quake(&mut self, quake: &jet_config::Quake) -> Option<String>;
+    /// `quake.autostart` is `on`: run `jet quake` at sign-in and now, or
+    /// stop running it at sign-in.
+    fn autostart(&mut self, _on: bool) {}
+    /// Open a text file in the system's editor for it.
+    fn open_file(&mut self, path: &Path);
+    /// The system's alert sound, where there is one.
+    fn beep(&mut self) {}
     /// Caption, border, corners and backdrop per the config.
     fn style_frame(&mut self, config: &Config);
     /// Say when the mouse leaves the window, which [`App::mouse_left`]
@@ -184,6 +202,8 @@ enum Pointer {
     Arrow,
     ResizeColumns,
     ResizeRows,
+    /// What the program in the pane asked for (OSC 22).
+    Shape(jet_core::PointerShape),
 }
 
 /// The settings in effect and the files they came from.
@@ -225,12 +245,16 @@ impl ConfigFile {
     /// reports once per save.
     fn read(&mut self) -> Option<Config> {
         let result = jet_config::load(&self.dirs);
+        // A broken include doesn't list its sources: keep watching the last
+        // good set so fixing it reloads.
+        let extra = match &result {
+            Ok(loaded) => [loaded.sources.as_slice(), &loaded.absent].concat(),
+            Err(_) => std::mem::take(&mut self.watched),
+        };
         self.watched = self.dirs.watched();
-        if let Ok(loaded) = &result {
-            for source in &loaded.sources {
-                if !self.watched.contains(source) {
-                    self.watched.push(source.clone());
-                }
+        for path in extra {
+            if !self.watched.contains(&path) {
+                self.watched.push(path);
             }
         }
         self.stamps = jet_config::stamps(&self.watched);
@@ -276,6 +300,10 @@ struct PaneSlot {
     /// The program in front and its working directory, looked up while
     /// it's focused and the status shows.
     front: Option<Front>,
+    /// The mouse pointer its program asked for (OSC 22).
+    pointer: jet_core::PointerShape,
+    /// The innermost context its programs announced (OSC 3008).
+    context: Option<jet_core::Context>,
     front_cwd: Option<PathBuf>,
     /// Area in client pixels, padding included.
     rect: Rect,
@@ -285,7 +313,23 @@ struct PaneSlot {
 struct Front {
     process: jet_pty::Process,
     /// Where to, when it's `ssh`.
-    ssh: Option<Ssh>,
+    ssh: Option<jet_core::Ssh>,
+}
+
+/// What a Ctrl+click on some text would do.
+#[derive(Clone, Debug, PartialEq)]
+struct Target {
+    pane: PaneId,
+    /// Underlined while hovered.
+    cells: Vec<(u16, std::ops::Range<u16>)>,
+    what: Clicked,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum Clicked {
+    Url(String),
+    /// A `[plumb]` rule matched.
+    Plumb(plumb::Hit),
 }
 
 /// What a `jet-cli` request asks to run in a new pane.
@@ -306,6 +350,8 @@ struct Tab {
     icon: Option<Icon>,
     /// The focused split fills the tab; the others are hidden.
     zoomed: bool,
+    /// A jetmux session's tab, which the daemon lays out.
+    remote: Option<jetmux::RemoteTab>,
 }
 
 impl Tab {
@@ -317,6 +363,7 @@ impl Tab {
             title: None,
             icon: None,
             zoomed: false,
+            remote: None,
         }
     }
 
@@ -378,6 +425,9 @@ struct App<H: Host> {
     status_lines: Vec<Arc<Line>>,
     /// When the focused pane's program was last looked up.
     polled: Instant,
+    /// The session as last saved, and when that was checked.
+    saved: Option<Session>,
+    saved_at: Instant,
     local_user: String,
     local_host: String,
     /// Image icons in the tab bar as last built: cell, row, file.
@@ -400,8 +450,9 @@ struct App<H: Host> {
     last_move: Option<(PaneId, i32, i32)>,
     /// Where the mouse last was, in client pixels.
     pointer: (i32, i32),
-    /// The URL under the mouse while the link modifier is held.
-    link: Option<(PaneId, Link)>,
+    /// The URL or plumbable text under the mouse while the link modifier
+    /// is held.
+    link: Option<Target>,
     /// The input method's uncommitted text and its cursor (a byte offset),
     /// drawn at the focused pane's cursor. Win32's IME draws its own.
     preedit: String,
@@ -410,6 +461,10 @@ struct App<H: Host> {
     ime_area: Option<Rect>,
     autoscroll_timer: bool,
     last_bell: Option<Instant>,
+    /// The config from before the theme palette opened, to go back to.
+    previewing: Option<Config>,
+    /// The window may close though something's running: the user said so.
+    close_confirmed: bool,
     /// Frames are paced by [`App::vblank`] (mailbox presents), rather than
     /// by blocking in vsync.
     paced: bool,
@@ -419,6 +474,11 @@ struct App<H: Host> {
     frame_pending: bool,
     /// The find bar or command palette, which takes the keys while open.
     overlay: Option<Overlay>,
+    /// jetmux sessions shown here, by a key of jet's.
+    remotes: HashMap<u64, jetmux::Attached>,
+    next_remote: u64,
+    /// Why the last jetmux session ended or couldn't start.
+    remote_problem: Option<String>,
 }
 
 impl<H: Host> App<H> {
@@ -430,21 +490,46 @@ impl<H: Host> App<H> {
         dpi: u32,
         focused: bool,
         settings: ConfigFile,
+        start: Start,
     ) -> Result<Self, BoxError> {
+        let Start {
+            early,
+            session,
+            first,
+        } = start;
         let config_now = &settings.config;
         let grid = (config_now.window.columns, config_now.window.rows);
         let socket = cli_transport::address_for(std::process::id());
         // Making the device is most of startup (D3D12 takes ~270 ms), so
         // the shell starts meanwhile and its prompt is about ready for the
         // first frame.
+        let first = match &early {
+            Some(early) => First {
+                profile: early.profile.clone(),
+                ..First::default()
+            },
+            None => first,
+        };
         let (gpu, (fonts, font_problem), pane) = std::thread::scope(|s| -> Result<_, BoxError> {
             let gpu = s.spawn(|| Gpu::new(instance, Some(&surface), false));
             let started = (|| -> Result<_, BoxError> {
                 let fonts = load_fonts(dpi, config_now, config_now.font.size)?;
                 let size = pty_size(grid, fonts.0.metrics())?;
-                let env = pane_env(&socket, FIRST_PANE);
-                let pane =
-                    spawn_shell(size, host.waker(Wake::Panes), config_now, None, None, &env)?;
+                let wake = host.waker(Wake::Panes);
+                let pane = match early {
+                    Some(early) => {
+                        early.pane.resize(size);
+                        let _ = early.wake.set(Arc::clone(&wake));
+                        // For what it said while nobody was listening.
+                        wake();
+                        early.pane
+                    }
+                    None => {
+                        let env = pane_env(&socket, FIRST_PANE);
+                        let (cwd, command) = first.launch(config_now);
+                        spawn_shell(size, wake, config_now, cwd, command.as_ref(), &env)?
+                    }
+                };
                 Ok((fonts, pane))
             })();
             let gpu = gpu.join().map_err(|_| "GPU setup panicked")??;
@@ -470,17 +555,18 @@ impl<H: Host> App<H> {
         // Draw through a non-sRGB view: colors are blended as given (see jet-render).
         let view_format = config.format.remove_srgb_suffix();
         config.view_formats = vec![view_format];
-        // Paced windows present in mailbox mode: never blocking, and the
-        // newest frame wins at each vblank.
-        let paced = host.paces_frames()
-            && surface
-                .get_capabilities(&gpu.adapter)
-                .present_modes
-                .contains(&wgpu::PresentMode::Mailbox);
-        config.present_mode = if paced {
-            wgpu::PresentMode::Mailbox
-        } else {
-            wgpu::PresentMode::AutoVsync
+        // Paced windows present without blocking, and the newest frame
+        // wins at each vblank (mailbox). Low latency doesn't wait for the
+        // vblank at all (immediate): a keystroke's frame goes straight out.
+        let modes = surface.get_capabilities(&gpu.adapter).present_modes;
+        let immediate =
+            settings.config.window.low_latency && modes.contains(&wgpu::PresentMode::Immediate);
+        let paced =
+            host.paces_frames() && (immediate || modes.contains(&wgpu::PresentMode::Mailbox));
+        config.present_mode = match (paced, immediate) {
+            (false, _) => wgpu::PresentMode::AutoVsync,
+            (true, true) => wgpu::PresentMode::Immediate,
+            (true, false) => wgpu::PresentMode::Mailbox,
         };
         config.desired_maximum_frame_latency = 1;
         // Usable before the first resize sizes it.
@@ -521,6 +607,8 @@ impl<H: Host> App<H> {
             status: Vec::new(),
             status_lines: Vec::new(),
             polled: Instant::now(),
+            saved: None,
+            saved_at: Instant::now(),
             local_user,
             local_host,
             icon_spots: Vec::new(),
@@ -541,15 +629,23 @@ impl<H: Host> App<H> {
             ime_area: None,
             autoscroll_timer: false,
             last_bell: None,
+            previewing: None,
+            close_confirmed: false,
             paced,
             drew_since_vblank: false,
             frame_pending: false,
             overlay: None,
+            remotes: HashMap::new(),
+            next_remote: 0,
+            remote_problem: None,
         };
         app.listen();
-        let id = app.adopt(pane, grid, None);
+        let id = app.adopt(pane, grid, first.profile.as_deref());
         let tab = app.take_tab_id();
         app.tabs.push(Tab::new(tab, id));
+        if let Some(session) = session {
+            app.restore(session, id);
+        }
         app.refresh_banner();
         app.host.style_frame(&app.settings.config);
         app.host.set_timer(Timer::Config, CONFIG_EVERY);
@@ -574,11 +670,8 @@ impl<H: Host> App<H> {
         command: Option<jet_config::Command>,
     ) -> Result<PaneId, BoxError> {
         let config = &self.settings.config;
-        let profile = name.and_then(|name| config.profiles.get(name));
-        let command = command
-            .as_ref()
-            .or(profile.and_then(|p| p.command.as_ref()));
-        let cwd = profile.and_then(|p| p.cwd.clone()).or(cwd);
+        let (cwd, profiled) = launch(config, cwd, name);
+        let command = command.as_ref().or(profiled);
         let size = pty_size(grid, self.renderer.cell_metrics())?;
         let env = pane_env(&self.socket, self.next_pane);
         let wake = self.host.waker(Wake::Panes);
@@ -592,8 +685,11 @@ impl<H: Host> App<H> {
         let icon = profile
             .and_then(|name| config.profiles.get(name))
             .map_or(&config.shell.icon, |p| &p.icon)
-            .clone();
-        if self.focused {
+            .clone()
+            // A session's tabs stand out from local ones.
+            .or_else(|| pane.is_remote().then(|| Icon::Svg(JETMUX_ICON.into())));
+        // A daemon's panes hear about focus as jet moves it.
+        if self.focused && !pane.is_remote() {
             pane.focus(true);
         }
         let id = self.next_pane;
@@ -601,9 +697,10 @@ impl<H: Host> App<H> {
         self.panes.insert(
             id,
             PaneSlot {
+                // Until the shell sets one: the bundled ConPTY never does.
+                title: pane.program().to_owned(),
                 pane,
                 snapshot: None,
-                title: String::new(),
                 icon,
                 progress: Progress::Hidden,
                 cwd: None,
@@ -614,6 +711,8 @@ impl<H: Host> App<H> {
                 exit: None,
                 front: None,
                 front_cwd: None,
+                pointer: jet_core::PointerShape::RESET,
+                context: None,
                 rect: Rect::default(),
                 grid,
             },
@@ -640,6 +739,7 @@ impl<H: Host> App<H> {
     }
 
     fn pump(&mut self) {
+        self.pump_remotes();
         let focused = self.focused_id();
         let mut dirty = false;
         let ids: Vec<PaneId> = self.panes.keys().copied().collect();
@@ -660,15 +760,17 @@ impl<H: Host> App<H> {
                         }
                     }
                     PaneEvent::Location(location) => {
-                        let what = What::Cwd {
-                            path: location.path.clone(),
-                            host: location.host.clone(),
-                        };
+                        let what = location.as_ref().map(|l| What::Cwd {
+                            path: l.path.clone(),
+                            host: l.host.clone(),
+                        });
                         if let Some(slot) = self.panes.get_mut(&id) {
-                            slot.location = Some(location);
+                            slot.location = location;
                             slot.location_at = Instant::now();
                         }
-                        self.emit(what, Some(id));
+                        if let Some(what) = what {
+                            self.emit(what, Some(id));
+                        }
                         dirty = true;
                     }
                     PaneEvent::UserVar(name, value) => {
@@ -687,9 +789,15 @@ impl<H: Host> App<H> {
                         self.emit(What::Bell, Some(id));
                     }
                     PaneEvent::Notify(note) => {
-                        // Not for the pane you're looking at: you can see it.
+                        // Not for the pane you're looking at, unless asked:
+                        // you can see it.
                         let watching = self.focused && focused == Some(id);
-                        if self.settings.config.terminal.notifications && !watching {
+                        let show = match note.occasion {
+                            Occasion::Always => true,
+                            Occasion::Unwatched => !watching,
+                            Occasion::Hidden => !self.focused,
+                        };
+                        if self.settings.config.terminal.notifications && show {
                             self.host.notify(&note.title, &note.body);
                         }
                         let (title, body) = (note.title, note.body);
@@ -700,6 +808,18 @@ impl<H: Host> App<H> {
                             slot.exit = status;
                         }
                         self.emit(What::CommandFinished { status }, Some(id));
+                        dirty = true;
+                    }
+                    PaneEvent::Pointer(shape) => {
+                        if let Some(slot) = self.panes.get_mut(&id) {
+                            // Shown from the next mouse move.
+                            slot.pointer = shape;
+                        }
+                    }
+                    PaneEvent::Context(context) => {
+                        if let Some(slot) = self.panes.get_mut(&id) {
+                            slot.context = context;
+                        }
                         dirty = true;
                     }
                     PaneEvent::Copy(text) => {
@@ -750,7 +870,7 @@ impl<H: Host> App<H> {
             self.reset_blink();
         }
         // The text under an underlined link may have moved.
-        if self.link.as_ref().is_some_and(|(pane, _)| *pane == id) {
+        if self.link.as_ref().is_some_and(|t| t.pane == id) {
             self.link = self.link_at(self.pointer.0, self.pointer.1);
         }
         true
@@ -834,6 +954,10 @@ impl<H: Host> App<H> {
         let m = self.renderer.cell_metrics();
         let mut rects = Vec::new();
         for tab in &self.tabs {
+            if let Some(remote) = tab.remote {
+                rects.extend(self.remote_rects(remote, area));
+                continue;
+            }
             tab.root
                 .layout(area, self.gap(), &mut rects, &mut Vec::new());
             // The rest keep their places, and sizes, for when it unzooms.
@@ -860,6 +984,7 @@ impl<H: Host> App<H> {
             }
         }
         self.refresh_banner();
+        self.sync_remotes();
     }
 
     /// The active tab's dividers, in layout order.
@@ -867,6 +992,9 @@ impl<H: Host> App<H> {
         let mut dividers = Vec::new();
         if let Some(tab) = self.tab().filter(|t| !t.zoomed) {
             let area = self.chrome().panes;
+            if let Some(remote) = tab.remote {
+                return self.remote_dividers(remote, area);
+            }
             tab.root
                 .layout(area, self.gap(), &mut Vec::new(), &mut dividers);
         }
@@ -910,6 +1038,14 @@ impl<H: Host> App<H> {
             m.height as i32 + pad
         };
         let ratio = divider.ratio_at(x, y, min);
+        if self.tab().is_some_and(|t| t.remote.is_some()) {
+            let permille = (ratio * 1000.0).round() as u16;
+            self.remote_act(jetmux_proto::Action::SetRatio {
+                split: u16::try_from(index).unwrap_or(u16::MAX),
+                permille,
+            });
+            return;
+        }
         if let Some(tab) = self.tabs.get_mut(self.active)
             && tab.root.set_ratio(index, ratio)
         {
@@ -1022,7 +1158,7 @@ impl<H: Host> App<H> {
                 }
                 Some(c)
             });
-            if let Some((_, link)) = self.link.as_ref().filter(|(pane, _)| pane == id) {
+            if let Some(link) = self.link.as_ref().filter(|t| t.pane == *id) {
                 for (row, cols) in &link.cells {
                     if let Some(line) = snapshot.lines.get_mut(usize::from(*row)) {
                         let mut underlined = (**line).clone();
@@ -1092,6 +1228,7 @@ impl<H: Host> App<H> {
         let title = (chrome.caption.h > 0 && !tabs_in_caption)
             .then(|| self.title_snapshot(colors, title_rect));
         let opacity = self.settings.config.window.opacity;
+        let fade = 1.0 - self.settings.config.window.unfocused_split_opacity;
 
         let mut grids: Vec<Grid<'_>> = Vec::new();
         let m = self.renderer.cell_metrics();
@@ -1128,7 +1265,7 @@ impl<H: Host> App<H> {
                 overlays.push(Quad {
                     pos: [rect.x as f32, rect.y as f32],
                     size: [rect.w as f32, rect.h as f32],
-                    color: [r, g, b, UNFOCUSED_FADE * opacity],
+                    color: [r, g, b, fade * opacity],
                 });
             }
         }
@@ -1298,6 +1435,7 @@ impl<H: Host> App<H> {
             },
             images: Vec::new(),
             search: None,
+            bracketed_paste: false,
         })
     }
 
@@ -1684,7 +1822,7 @@ impl<H: Host> App<H> {
                 host: None,
                 path: dir.to_string_lossy().into_owned(),
             });
-        let session = status::Session {
+        let session = jet_config::status::Session {
             title: slot.map_or("", |s| s.title.as_str()),
             location: slot.and_then(|s| s.location.as_ref()).or(polled.as_ref()),
             ssh,
@@ -1697,10 +1835,12 @@ impl<H: Host> App<H> {
             progress: slot.map(|s| s.progress),
             exit: slot.and_then(|s| s.exit),
             vars: slot.map(|s| &s.vars),
+            context: slot.and_then(|s| s.context.as_ref()),
             local_user: &self.local_user,
             local_host: &self.local_host,
         };
-        let shown = status::shown(segments, &session, c.active_foreground, c.background);
+        let shown =
+            jet_config::status::shown(segments, &session, c.active_foreground, c.background);
         let changed = shown != self.status;
         self.status = shown;
         changed
@@ -1731,7 +1871,7 @@ impl<H: Host> App<H> {
             slot.front = process.map(|process| {
                 let argv = jet_config::Command::Line(process.command_line.clone()).argv();
                 Front {
-                    ssh: status::ssh_target(&argv),
+                    ssh: jet_core::ssh_target(&argv),
                     process,
                 }
             });
@@ -1772,6 +1912,7 @@ impl<H: Host> App<H> {
             },
             images: Vec::new(),
             search: None,
+            bracketed_paste: false,
         })
     }
 
@@ -1798,6 +1939,7 @@ impl<H: Host> App<H> {
             },
             images: Vec::new(),
             search: None,
+            bracketed_paste: false,
         }
     }
 
@@ -2044,6 +2186,7 @@ impl<H: Host> App<H> {
             &self.settings.error,
             &self.font_problem,
             &self.hotkey_problem,
+            &self.remote_problem,
         ]
         .into_iter()
         .flatten()
@@ -2064,9 +2207,14 @@ impl<H: Host> App<H> {
             self.refresh_banner();
             self.render();
         }
-        let Some(new) = new else {
-            return;
-        };
+        if let Some(new) = new {
+            self.apply_config(new);
+            self.emit(What::ConfigReloaded, None);
+        }
+    }
+
+    /// Put `new` in effect.
+    fn apply_config(&mut self, new: Config) {
         let old = std::mem::replace(&mut self.settings.config, new);
         let new = &self.settings.config;
         self.bindings = new.bindings().unwrap_or_default();
@@ -2076,9 +2224,14 @@ impl<H: Host> App<H> {
             }
         }
         let quake_changed = new.quake != old.quake;
-        let frame_changed = new.window != old.window || new.vt_settings() != old.vt_settings();
+        let frame_changed = new.window != old.window
+            || new.vt_settings() != old.vt_settings()
+            || new.colors != old.colors;
         let bar_changed = new.tab_bar != old.tab_bar || new.status != old.status;
         let fonts_changed = new.font != old.font || new.window.padding != old.window.padding;
+        if new.quake.autostart != old.quake.autostart && !self.host.quake() {
+            self.host.autostart(new.quake.autostart);
+        }
         if quake_changed && self.host.quake() {
             let problem = self.host.reconfigure_quake(&self.settings.config.quake);
             if problem != self.hotkey_problem {
@@ -2090,6 +2243,8 @@ impl<H: Host> App<H> {
         if frame_changed {
             self.renderer
                 .set_opacity(self.settings.config.window.opacity);
+            self.renderer
+                .set_selection(selection(&self.settings.config));
             self.host.style_frame(&self.settings.config);
             self.host.request(WindowRequest::Reframe);
         }
@@ -2105,7 +2260,6 @@ impl<H: Host> App<H> {
             self.relayout(true);
         }
         self.render();
-        self.emit(What::ConfigReloaded, None);
     }
 
     fn perform(&mut self, action: Action) {
@@ -2121,6 +2275,7 @@ impl<H: Host> App<H> {
                 let outcome = match &mut self.overlay {
                     Some(Overlay::Find(find)) => find.paste(&text),
                     Some(Overlay::Palette(palette)) => palette.paste(&text),
+                    Some(Overlay::Rename(rename)) => rename.paste(&text),
                     None => Outcome::Nothing,
                 };
                 self.overlay_did(outcome);
@@ -2132,11 +2287,13 @@ impl<H: Host> App<H> {
             }
             Action::NewTab(profile) => self.new_tab(profile.as_deref()),
             Action::CloseSurface => {
-                if let Some(id) = focused {
+                if let Some(id) = focused
+                    && !self.ask_close(Closing::Pane(id))
+                {
                     self.close_pane(id);
                 }
             }
-            Action::CloseTab => self.close_tab(self.active),
+            Action::CloseTab => self.ask_close_tab(self.active),
             Action::NextTab | Action::PreviousTab => {
                 let n = self.tabs.len().max(1);
                 let step = if action == Action::NextTab { 1 } else { n - 1 };
@@ -2162,6 +2319,45 @@ impl<H: Host> App<H> {
                     slot.pane.jump_to_prompt(n);
                 }
             }
+            Action::CopyMode => {
+                if let Some(slot) = self.focused_slot() {
+                    slot.pane.copy_mode();
+                }
+            }
+            Action::QuickSelect => {
+                if let Some(slot) = self.focused_slot() {
+                    slot.pane.quick_select();
+                }
+            }
+            Action::ResizeSplit(dir, percent) => {
+                if self.remote_resize(dir, percent) {
+                    return;
+                }
+                if let Some(tab) = self.tabs.get_mut(self.active)
+                    && tab.root.nudge(tab.focused, dir, f32::from(percent) / 100.0)
+                {
+                    self.relayout(false);
+                    self.render();
+                }
+            }
+            Action::EqualizeSplits => {
+                // jetmux has no such thing.
+                if let Some(tab) = self.tabs.get_mut(self.active)
+                    && tab.remote.is_none()
+                {
+                    tab.root.equalize();
+                    self.relayout(false);
+                    self.render();
+                }
+            }
+            Action::RenameTab => {
+                if let Some(tab) = self.tabs.get(self.active) {
+                    let name = tab.title.as_deref().unwrap_or_default();
+                    self.overlay = Some(Overlay::Rename(Rename::new(tab.id, name)));
+                    self.render();
+                }
+            }
+            Action::MoveTab(n) => self.move_tab(n),
             Action::StartSearch => {
                 if let Some(id) = focused
                     && !matches!(&self.overlay, Some(Overlay::Find(f)) if f.pane == id)
@@ -2182,11 +2378,13 @@ impl<H: Host> App<H> {
                 self.close_overlay();
                 if !open {
                     let commands = self.palette_commands();
-                    self.overlay = Some(Overlay::Palette(Palette::new(commands)));
-                    self.render();
+                    self.open_palette(Palette::new("", commands));
                 }
             }
             Action::ToggleSplitZoom => {
+                if self.remote_act(jetmux_proto::Action::ToggleZoom) {
+                    return;
+                }
                 if let Some(tab) = self.tabs.get_mut(self.active)
                     && (tab.zoomed || tab.root.panes().len() > 1)
                 {
@@ -2197,6 +2395,20 @@ impl<H: Host> App<H> {
             }
             Action::ReloadConfig => self.reload_config(true),
             Action::Ignore => {}
+            Action::Detach => self.detach(),
+            Action::OpenConfig => self.open_config(),
+            Action::ChooseTheme => self.choose_theme(),
+            Action::NewTabMenu => self.new_tab_menu(),
+            Action::CopyVersion => {
+                if let Err(err) = self.host.set_clipboard(&version()) {
+                    eprintln!("jet: copying the version: {err}");
+                }
+            }
+            Action::Text(bytes) => {
+                if let Some(slot) = focused.and_then(|id| self.panes.get(&id)) {
+                    slot.pane.input(bytes);
+                }
+            }
         }
     }
 
@@ -2214,9 +2426,249 @@ impl<H: Host> App<H> {
         if let Some(Overlay::Find(find)) = self.overlay.take()
             && let Some(slot) = self.panes.get(&find.pane)
         {
-            slot.pane.search(String::new());
+            slot.pane.search(String::new(), false);
+        }
+        if let Some(before) = self.previewing.take() {
+            self.apply_config(before);
         }
         self.render();
+    }
+
+    fn open_palette(&mut self, palette: Palette) {
+        self.close_overlay();
+        self.overlay = Some(Overlay::Palette(palette));
+        self.render();
+    }
+
+    /// Ask, in the palette, `question` with these answers; the first is
+    /// what Enter picks.
+    fn ask(&mut self, question: &str, answers: Vec<(String, Choice)>) {
+        let commands = answers
+            .into_iter()
+            .map(|(label, choice)| PaletteCommand {
+                label,
+                hint: String::new(),
+                choice,
+            })
+            .collect();
+        self.open_palette(Palette::new(question, commands));
+    }
+
+    /// Do what was picked in the palette, which has closed.
+    fn pick(&mut self, choice: Choice) {
+        match choice {
+            Choice::Run(action) => self.perform(action),
+            Choice::Close(Closing::Pane(id)) => self.close_pane(id),
+            Choice::Close(Closing::Tab(id)) => {
+                if let Some(index) = self.tabs.iter().position(|t| t.id == id) {
+                    self.close_tab(index);
+                }
+            }
+            Choice::Close(Closing::Window) => {
+                self.close_confirmed = true;
+                self.host.request(WindowRequest::Close);
+            }
+            Choice::Paste(id, text) => {
+                if let Some(slot) = self.panes.get(&id) {
+                    slot.pane.paste(text);
+                }
+            }
+            Choice::Theme(name) => self.write_theme(&name),
+            Choice::Cancel => {}
+        }
+    }
+
+    /// With a theme selected in the palette, show it.
+    fn preview_theme(&mut self) {
+        let Some(Overlay::Palette(palette)) = &self.overlay else {
+            return;
+        };
+        let (Some(Choice::Theme(name)), Some(_)) = (palette.current(), &self.previewing) else {
+            return;
+        };
+        match jet_config::load_with_theme(&self.settings.dirs, name) {
+            Ok(loaded) => self.apply_config(loaded.config),
+            Err(err) => eprintln!("jet: previewing {name}: {err}"),
+        }
+    }
+
+    /// The built-in themes and the user's, to pick from; each shows while
+    /// selected.
+    fn choose_theme(&mut self) {
+        let themes = self.settings.dirs.themes();
+        let current = self.settings.config.theme.name.clone();
+        let commands = themes
+            .into_iter()
+            .map(|name| PaletteCommand {
+                hint: if current.as_deref() == Some(name.as_str()) {
+                    "current".into()
+                } else {
+                    String::new()
+                },
+                choice: Choice::Theme(name.clone()),
+                label: name,
+            })
+            .collect();
+        let mut palette = Palette::new("theme", commands);
+        if let Some(name) = current {
+            palette.select(&Choice::Theme(name));
+        }
+        self.open_palette(palette);
+        self.previewing = Some(self.settings.config.clone());
+    }
+
+    /// Set `[theme] name` in the config file and load it.
+    fn write_theme(&mut self, name: &str) {
+        let written = (|| -> Result<(), String> {
+            let path = self
+                .settings
+                .dirs
+                .main_path()
+                .ok_or("no place for a config file")?;
+            let text = match std::fs::read_to_string(&path) {
+                Ok(text) => text,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+                Err(err) => return Err(format!("{}: {err}", path.display())),
+            };
+            let new = jet_config::with_theme(&text, name).ok_or_else(|| {
+                format!(
+                    "set [theme] name = \"{name}\" by hand in {}",
+                    path.display()
+                )
+            })?;
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+            }
+            std::fs::write(&path, new).map_err(|e| format!("{}: {e}", path.display()))
+        })();
+        self.reload_config(true);
+        let took = self.settings.config.theme.name.as_deref() == Some(name);
+        let problem = match written {
+            Err(err) => Some(format!("theme: {err}")),
+            Ok(()) if !took && self.settings.error.is_none() => Some(format!(
+                "theme: another file (an include?) sets the theme over {name}"
+            )),
+            Ok(()) => None,
+        };
+        if let Some(problem) = problem {
+            self.settings.error = Some(problem);
+            self.banner_dismissed = false;
+            self.refresh_banner();
+            self.render();
+        }
+    }
+
+    /// The config file in an editor: `$VISUAL` or `$EDITOR` in a new tab,
+    /// else the system's. A missing one starts as the documented defaults.
+    fn open_config(&mut self) {
+        let Some(path) = self.settings.dirs.main_path() else {
+            eprintln!("jet: no place for a config file");
+            return;
+        };
+        if !path.exists() {
+            let made = path
+                .parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .and_then(|()| std::fs::write(&path, jet_config::starter()));
+            if let Err(err) = made {
+                self.settings.error = Some(format!("{}: {err}", path.display()));
+                self.banner_dismissed = false;
+                self.refresh_banner();
+                self.render();
+                return;
+            }
+        }
+        let editor = ["VISUAL", "EDITOR"]
+            .into_iter()
+            .find_map(|v| std::env::var(v).ok().filter(|e| !e.trim().is_empty()));
+        if let Some(editor) = editor {
+            let mut argv = jet_config::Command::Line(editor).argv();
+            argv.push(path.to_string_lossy().into_owned());
+            let command = Some(jet_config::Command::Argv(argv));
+            match self.open_tab(path.parent().map(Path::to_owned), None, command) {
+                Ok(_) => return,
+                Err(err) => eprintln!("jet: opening the config in $EDITOR: {err}"),
+            }
+        }
+        self.host.open_file(&path);
+    }
+
+    /// The profiles to open a tab with.
+    fn new_tab_menu(&mut self) {
+        let mut entries = vec![("Default shell".to_owned(), Action::NewTab(None))];
+        for name in self.settings.config.profiles.keys() {
+            entries.push((name.clone(), Action::NewTab(Some(name.clone()))));
+        }
+        let commands = entries
+            .into_iter()
+            .map(|(label, action)| PaletteCommand {
+                hint: self.hint(&action),
+                label,
+                choice: Choice::Run(action),
+            })
+            .collect();
+        self.open_palette(Palette::new("new tab", commands));
+    }
+
+    fn hint(&self, action: &Action) -> String {
+        keybinds::chord_for(&self.bindings, action)
+            .map(keybinds::chord_name)
+            .unwrap_or_default()
+    }
+
+    /// What's running in pane `id` besides its shell, if anything.
+    fn busy(&self, id: PaneId) -> Option<String> {
+        let shell = self.panes.get(&id)?.pane.pid()?;
+        let front = jet_pty::foreground(shell)?;
+        // Console hosts and WSL's helper stay up beside an idle shell.
+        let helper = ["conhost.exe", "openconsole.exe", "wslhost.exe"];
+        let name = front.name.to_lowercase();
+        (front.pid != shell && !helper.contains(&name.as_str())).then_some(front.name)
+    }
+
+    /// When something's running in `what` and the config says to, ask
+    /// before closing it. Whether it asked (the caller doesn't close).
+    fn ask_close(&mut self, what: Closing) -> bool {
+        if !self.settings.config.window.confirm_close {
+            return false;
+        }
+        let (panes, label) = match what {
+            Closing::Pane(id) => {
+                let alone = self.tab().is_some_and(|t| t.root.panes().len() == 1);
+                (vec![id], if alone { "Close tab" } else { "Close split" })
+            }
+            Closing::Tab(id) => match self.tabs.iter().find(|t| t.id == id) {
+                Some(tab) => (tab.root.panes(), "Close tab"),
+                None => return false,
+            },
+            Closing::Window => (self.panes.keys().copied().collect(), "Close window"),
+        };
+        let Some(running) = panes.into_iter().find_map(|id| self.busy(id)) else {
+            return false;
+        };
+        let answers = vec![
+            (label.to_owned(), Choice::Close(what)),
+            ("Cancel".to_owned(), Choice::Cancel),
+        ];
+        self.ask(&format!("{running} is running"), answers);
+        true
+    }
+
+    fn ask_close_tab(&mut self, index: usize) {
+        let Some(id) = self.tabs.get(index).map(|t| t.id) else {
+            return;
+        };
+        if !self.ask_close(Closing::Tab(id)) {
+            self.close_tab(index);
+        }
+    }
+
+    /// The window was asked to close: whether to let it, rather than ask
+    /// first.
+    pub fn close_requested(&mut self) -> bool {
+        self.host.quake()
+            || std::mem::take(&mut self.close_confirmed)
+            || !self.ask_close(Closing::Window)
     }
 
     /// Act on what a key did to the overlay.
@@ -2227,11 +2679,15 @@ impl<H: Host> App<H> {
                 if let Some(Overlay::Find(find)) = &self.overlay
                     && let Some(slot) = self.panes.get(&find.pane)
                 {
-                    slot.pane.search(find.query().to_owned());
+                    slot.pane.search(find.query().to_owned(), find.regex);
                 }
                 self.render();
+                self.preview_theme();
             }
-            Outcome::Moved => self.render(),
+            Outcome::Moved => {
+                self.render();
+                self.preview_theme();
+            }
             Outcome::Close => self.close_overlay(),
             Outcome::Step(n) => {
                 if let Some(Overlay::Find(find)) = &self.overlay
@@ -2240,9 +2696,26 @@ impl<H: Host> App<H> {
                     slot.pane.search_step(n);
                 }
             }
-            Outcome::Run(action) => {
+            Outcome::Pick(choice) => {
+                // Keep a picked theme up while it's written.
+                if matches!(choice, Choice::Theme(_)) {
+                    self.previewing = None;
+                }
                 self.close_overlay();
-                self.perform(action);
+                self.pick(choice);
+            }
+            Outcome::Rename(name) => {
+                if let Some(Overlay::Rename(rename)) = &self.overlay
+                    && let Some(tab) = self.tabs.iter_mut().find(|t| t.id == rename.tab)
+                {
+                    if tab.remote.is_some() {
+                        // The daemon names it (or, empty, goes back to titles).
+                        self.remote_act(jetmux_proto::Action::RenameTab(name));
+                    } else {
+                        tab.title = (!name.is_empty()).then_some(name);
+                    }
+                }
+                self.close_overlay();
             }
         }
     }
@@ -2262,6 +2735,7 @@ impl<H: Host> App<H> {
         match overlay {
             Overlay::Find(find) => find.draw(snapshot, colors, typing),
             Overlay::Palette(palette) => palette.draw(snapshot, colors, typing),
+            Overlay::Rename(rename) => rename.draw(snapshot, colors, typing),
         }
     }
 
@@ -2298,6 +2772,15 @@ impl<H: Host> App<H> {
             ("Next tab".into(), Action::NextTab),
             ("Previous tab".into(), Action::PreviousTab),
         ]);
+        if self.tab().is_some_and(|t| t.remote.is_some()) {
+            list.push(("Detach jetmux session".into(), Action::Detach));
+        }
+        list.push((format!("About: {} (copy)", version()), Action::CopyVersion));
+        list.extend([
+            ("Open config".into(), Action::OpenConfig),
+            ("Choose theme".into(), Action::ChooseTheme),
+            ("New tab with profile".into(), Action::NewTabMenu),
+        ]);
         for (i, tab) in self.tabs.iter().enumerate() {
             let (label, _) = self.tab_label(tab);
             list.push((
@@ -2312,6 +2795,12 @@ impl<H: Host> App<H> {
                 "Copy last command's output".into(),
                 Action::CopyCommandOutput,
             ),
+            ("Rename tab".into(), Action::RenameTab),
+            ("Move tab left".into(), Action::MoveTab(-1)),
+            ("Move tab right".into(), Action::MoveTab(1)),
+            ("Equalize splits".into(), Action::EqualizeSplits),
+            ("Copy mode".into(), Action::CopyMode),
+            ("Quick select".into(), Action::QuickSelect),
             ("Jump to previous prompt".into(), Action::JumpToPrompt(-1)),
             ("Jump to next prompt".into(), Action::JumpToPrompt(1)),
             ("Increase font size".into(), Action::FontSize(1.0)),
@@ -2321,11 +2810,9 @@ impl<H: Host> App<H> {
         ]);
         list.into_iter()
             .map(|(label, action)| PaletteCommand {
-                hint: keybinds::chord_for(&self.bindings, &action)
-                    .map(keybinds::chord_name)
-                    .unwrap_or_default(),
+                hint: self.hint(&action),
                 label,
-                action,
+                choice: Choice::Run(action),
             })
             .collect()
     }
@@ -2336,6 +2823,7 @@ impl<H: Host> App<H> {
         let outcome = match &mut self.overlay {
             Some(Overlay::Find(find)) => find.key(input),
             Some(Overlay::Palette(palette)) => palette.key(input, rows),
+            Some(Overlay::Rename(rename)) => rename.key(input),
             None => return false,
         };
         self.overlay_did(outcome);
@@ -2358,7 +2846,7 @@ impl<H: Host> App<H> {
             palette.at(slot.grid, col, row)
         });
         match hit {
-            Some(Some(action)) => self.overlay_did(Outcome::Run(action)),
+            Some(Some(choice)) => self.overlay_did(Outcome::Pick(choice)),
             Some(None) => {}
             None => self.close_overlay(),
         }
@@ -2390,18 +2878,224 @@ impl<H: Host> App<H> {
             .or_else(|| slot.pane.pid().and_then(jet_pty::process_cwd))
     }
 
+    /// With `[shell] follow-ssh`, when no profile was asked for and the
+    /// focused pane is running `ssh` or `wsl`: that again, into the
+    /// directory its shell last reported.
+    fn run_again(&self, profile: Option<&str>) -> Option<jet_config::Command> {
+        if profile.is_some() || !self.settings.config.shell.follow_ssh {
+            return None;
+        }
+        let slot = self.focused_slot()?;
+        let process = jet_pty::foreground(slot.pane.pid()?)?;
+        let argv = jet_config::Command::Line(process.command_line).argv();
+        let location = slot.location.as_ref();
+        let remote = location
+            .filter(|l| {
+                l.host
+                    .as_deref()
+                    .is_some_and(|h| !h.eq_ignore_ascii_case(&self.local_host))
+            })
+            .map(|l| l.path.as_str());
+        // WSL shares the Windows host name: any Linux path will do.
+        let linux = location
+            .map(|l| l.path.as_str())
+            .filter(|path| path.starts_with('/'));
+        status::ssh_again(&argv, remote, None)
+            .or_else(|| status::wsl_again(&argv, linux))
+            .map(jet_config::Command::Argv)
+    }
+
     fn new_tab(&mut self, profile: Option<&str>) {
-        if let Err(err) = self.open_tab(self.inherited_cwd(), profile, None) {
+        if let Some((name, spec)) = self.jetmux_profile(profile) {
+            self.open_jetmux(&name, &spec);
+            return;
+        }
+        let command = self.run_again(profile);
+        let profile = self.or_default(profile, &command);
+        if let Err(err) = self.open_tab(self.inherited_cwd(), profile.as_deref(), command) {
             eprintln!("jet: opening a tab: {err}");
         }
     }
 
+    /// `profile`, else `[shell] profile` unless following ssh.
+    fn or_default(
+        &self,
+        profile: Option<&str>,
+        again: &Option<jet_config::Command>,
+    ) -> Option<String> {
+        let default = again
+            .is_none()
+            .then(|| self.settings.config.shell.profile.clone());
+        profile.map(str::to_owned).or(default.flatten())
+    }
+
     fn new_split(&mut self, side: Direction, profile: Option<&str>) {
+        let split = jetmux_proto::Action::Split(jetmux::wire_direction(side), Default::default());
+        if self.remote_act(split) {
+            return;
+        }
+        if let Some((name, spec)) = self.jetmux_profile(profile) {
+            self.open_jetmux(&name, &spec);
+            return;
+        }
         let Some(target) = self.focused_id() else {
             return;
         };
-        if let Err(err) = self.open_split(target, side, self.inherited_cwd(), profile, None) {
+        let command = self.run_again(profile);
+        let profile = self.or_default(profile, &command);
+        let cwd = self.inherited_cwd();
+        if let Err(err) = self.open_split(target, side, cwd, profile.as_deref(), command) {
             eprintln!("jet: opening a split: {err}");
+        }
+    }
+
+    /// Save the session for next time, when restoring is on, if it changed
+    /// (or the window is `closing`: the last to close wins).
+    fn save_session(&mut self, closing: bool) {
+        self.saved_at = Instant::now();
+        if !self.settings.config.window.restore || self.host.quake() {
+            return;
+        }
+        let session = self.session();
+        if closing || self.saved.as_ref() != Some(&session) {
+            session.save();
+            self.saved = Some(session);
+        }
+    }
+
+    /// The tabs and splits to open next time.
+    fn session(&self) -> Session {
+        // A jetmux session keeps its own tabs.
+        let local: Vec<&Tab> = self.tabs.iter().filter(|t| t.remote.is_none()).collect();
+        let active = self
+            .tab()
+            .and_then(|front| local.iter().position(|t| t.id == front.id))
+            .unwrap_or(0);
+        let tabs = local
+            .into_iter()
+            .map(|tab| session::Tab {
+                title: tab.title.clone(),
+                root: self.saved(&tab.root),
+                focused: tab
+                    .root
+                    .panes()
+                    .iter()
+                    .position(|id| *id == tab.focused)
+                    .unwrap_or(0),
+            })
+            .collect();
+        Session { tabs, active }
+    }
+
+    fn saved(&self, node: &Node) -> session::Node {
+        match node {
+            Node::Leaf(id) => {
+                let slot = self.panes.get(id);
+                session::Node::Pane {
+                    cwd: slot.and_then(|slot| {
+                        slot.cwd
+                            .clone()
+                            .filter(|dir| dir.is_dir())
+                            .or_else(|| slot.pane.pid().and_then(jet_pty::process_cwd))
+                    }),
+                    profile: slot.and_then(|slot| slot.profile.clone()),
+                }
+            }
+            Node::Split {
+                horizontal,
+                ratio,
+                first,
+                second,
+            } => session::Node::Split {
+                horizontal: *horizontal,
+                ratio: *ratio,
+                first: Box::new(self.saved(first)),
+                second: Box::new(self.saved(second)),
+            },
+        }
+    }
+
+    /// Open `session`'s tabs; the first tab's first shell, `first`, is
+    /// already running in the only tab.
+    fn restore(&mut self, session: Session, first: PaneId) {
+        let mut first = Some(first);
+        let mut tabs = Vec::new();
+        for saved in session.tabs {
+            // The tab already open keeps its id.
+            let id = if tabs.is_empty() {
+                self.tabs.first().map(|t| t.id)
+            } else {
+                None
+            };
+            let Some(root) = self.rebuild(&saved.root, &mut first) else {
+                continue;
+            };
+            let panes = root.panes();
+            let Some(&lead) = panes.first() else {
+                continue;
+            };
+            let mut tab = Tab::new(id.unwrap_or_else(|| self.take_tab_id()), lead);
+            tab.focused = panes.get(saved.focused).copied().unwrap_or(lead);
+            tab.title = saved.title;
+            tab.root = root;
+            tabs.push(tab);
+        }
+        if tabs.is_empty() {
+            return;
+        }
+        self.tabs = tabs;
+        self.active = session.active.min(self.tabs.len() - 1);
+    }
+
+    /// `saved`'s splits with a shell in each pane, `first` (once) being the
+    /// one already started. A pane that won't start leaves its sibling.
+    fn rebuild(&mut self, saved: &session::Node, first: &mut Option<PaneId>) -> Option<Node> {
+        match saved {
+            session::Node::Pane { cwd, profile } => {
+                if let Some(id) = first.take() {
+                    return Some(Node::Leaf(id));
+                }
+                let cwd = cwd.clone().filter(|dir| dir.is_dir());
+                let profile = profile
+                    .as_deref()
+                    .filter(|name| self.settings.config.profiles.contains_key(*name));
+                match self.spawn(self.first_grid(), cwd, profile, None) {
+                    Ok(id) => Some(Node::Leaf(id)),
+                    Err(err) => {
+                        eprintln!("jet: restoring a shell: {err}");
+                        None
+                    }
+                }
+            }
+            session::Node::Split {
+                horizontal,
+                ratio,
+                first: a,
+                second: b,
+            } => match (self.rebuild(a, first), self.rebuild(b, first)) {
+                (Some(a), Some(b)) => Some(Node::Split {
+                    horizontal: *horizontal,
+                    ratio: ratio.clamp(0.05, 0.95),
+                    first: Box::new(a),
+                    second: Box::new(b),
+                }),
+                (a, b) => a.or(b),
+            },
+        }
+    }
+
+    /// Profile `name`, when it shows a jetmux session.
+    fn jetmux_profile(&self, name: Option<&str>) -> Option<(String, jet_config::Jetmux)> {
+        let name = name?;
+        let spec = self.settings.config.profiles.get(name)?.jetmux.clone()?;
+        Some((name.to_owned(), spec))
+    }
+
+    /// jetmux sessions open their own tabs, when they're ready.
+    fn refuse_jetmux(&self, profile: Option<&str>) -> Result<(), BoxError> {
+        match self.jetmux_profile(profile) {
+            Some((name, _)) => Err(format!("{name} is a jetmux session: open it from jet").into()),
+            None => Ok(()),
         }
     }
 
@@ -2416,6 +3110,7 @@ impl<H: Host> App<H> {
         profile: Option<&str>,
         command: Option<jet_config::Command>,
     ) -> Result<PaneId, BoxError> {
+        self.refuse_jetmux(profile)?;
         let id = self.spawn(self.current_grid(), cwd, profile, command)?;
         let tab = self.take_tab_id();
         self.tabs.push(Tab::new(tab, id));
@@ -2436,6 +3131,10 @@ impl<H: Host> App<H> {
         profile: Option<&str>,
         command: Option<jet_config::Command>,
     ) -> Result<PaneId, BoxError> {
+        self.refuse_jetmux(profile)?;
+        if self.tab().is_some_and(|t| t.remote.is_some()) {
+            return Err("that's a jetmux tab: split it from jet".into());
+        }
         let id = self.spawn(self.current_grid(), cwd, profile, command)?;
         if let Some(tab) = self.tabs.get_mut(self.active) {
             tab.root.split(target, id, side);
@@ -2492,6 +3191,19 @@ impl<H: Host> App<H> {
         self.after_focus_change();
     }
 
+    /// Move the active tab `n` places right (negative, left), wrapping.
+    fn move_tab(&mut self, n: isize) {
+        let len = self.tabs.len();
+        if len < 2 {
+            return;
+        }
+        let to = (self.active as isize + n).rem_euclid(len as isize) as usize;
+        let tab = self.tabs.remove(self.active);
+        self.tabs.insert(to, tab);
+        self.active = to;
+        self.render();
+    }
+
     fn activate_tab(&mut self, index: usize) {
         if index >= self.tabs.len() {
             return;
@@ -2515,7 +3227,7 @@ impl<H: Host> App<H> {
         // The find bar belongs to its pane, the palette to the moment.
         let keep = match &self.overlay {
             Some(Overlay::Find(find)) => Some(find.pane) == self.focused_id(),
-            Some(Overlay::Palette(_)) => false,
+            Some(Overlay::Palette(_) | Overlay::Rename(_)) => false,
             None => true,
         };
         if !keep {
@@ -2527,6 +3239,7 @@ impl<H: Host> App<H> {
         self.blink_timer_restart();
         self.refresh_banner();
         self.update_title();
+        self.sync_remotes();
         self.render();
     }
 
@@ -2538,6 +3251,9 @@ impl<H: Host> App<H> {
     /// Close a pane; its tab closes with its last pane, the window with the
     /// last tab.
     fn close_pane(&mut self, id: PaneId) {
+        if self.close_remote_pane(id) {
+            return;
+        }
         let Some(index) = self.tabs.iter().position(|t| t.root.panes().contains(&id)) else {
             return;
         };
@@ -2576,6 +3292,9 @@ impl<H: Host> App<H> {
     }
 
     fn close_tab(&mut self, index: usize) {
+        if self.close_remote_tab(index) {
+            return;
+        }
         let Some(tab) = self.tabs.get(index) else {
             return;
         };
@@ -2612,10 +3331,27 @@ impl<H: Host> App<H> {
         let Some(slot) = self.panes.get(&id) else {
             return;
         };
-        match self.host.clipboard() {
-            Some(text) => slot.pane.paste(text),
-            None => eprintln!("jet: nothing to paste (clipboard empty or busy)"),
+        let Some(text) = self.host.clipboard() else {
+            eprintln!("jet: nothing to paste (clipboard empty or busy)");
+            return;
+        };
+        let bracketed = slot.snapshot.as_ref().is_some_and(|s| s.bracketed_paste);
+        let protect = self.settings.config.terminal.paste_protection;
+        if !protect || bracketed || !text.contains(['\n', '\r']) {
+            slot.pane.paste(text);
+            return;
         }
+        let lines = text.trim_end().lines().count().max(1);
+        let what = if lines == 1 {
+            "a line".to_owned()
+        } else {
+            format!("{lines} lines")
+        };
+        let answers = vec![
+            ("Paste".to_owned(), Choice::Paste(id, text)),
+            ("Cancel".to_owned(), Choice::Cancel),
+        ];
+        self.ask(&format!("paste {what}, which may run?"), answers);
     }
 
     /// The active tab's pane under client `(x, y)`.
@@ -2670,8 +3406,8 @@ impl<H: Host> App<H> {
             match action {
                 MouseAction::Move => self.hover_link(),
                 MouseAction::Press(MouseButton::Left) => {
-                    if let Some((_, link)) = self.link_at(x, y) {
-                        self.host.open_url(&link.url);
+                    if let Some(target) = self.link_at(x, y) {
+                        self.click_target(target);
                         self.swallow_release = true;
                         return;
                     }
@@ -2692,7 +3428,7 @@ impl<H: Host> App<H> {
         {
             if let Some((i, on_close)) = self.tab_hit(x, y) {
                 match button {
-                    MouseButton::Left if on_close => self.close_tab(i),
+                    MouseButton::Left if on_close => self.ask_close_tab(i),
                     // A plain window drags by its tabs too; the quake
                     // window stays where it's placed.
                     MouseButton::Left if !self.host.quake() => {
@@ -2702,9 +3438,11 @@ impl<H: Host> App<H> {
                         return;
                     }
                     MouseButton::Left => self.activate_tab(i),
-                    MouseButton::Middle => self.close_tab(i),
-                    MouseButton::Right => {}
+                    MouseButton::Middle => self.ask_close_tab(i),
+                    MouseButton::Right => self.new_tab_menu(),
                 }
+            } else if button == MouseButton::Right {
+                self.new_tab_menu();
             }
             self.swallow_release = true;
             return;
@@ -2814,9 +3552,12 @@ impl<H: Host> App<H> {
             None => {
                 let chrome = self.chrome();
                 if chrome.tabs.contains(x, y) || chrome.caption.contains(x, y) {
-                    Pointer::Arrow
-                } else {
-                    Pointer::Text
+                    return Pointer::Arrow;
+                }
+                let asked = self.pane_at(x, y).and_then(|id| self.panes.get(&id));
+                match asked.map(|slot| slot.pointer) {
+                    Some(shape) if shape != jet_core::PointerShape::RESET => Pointer::Shape(shape),
+                    _ => Pointer::Text,
                 }
             }
         }
@@ -2832,18 +3573,150 @@ impl<H: Host> App<H> {
         }
     }
 
-    /// The URL at client `(x, y)`, if the link modifier is held.
-    fn link_at(&self, x: i32, y: i32) -> Option<(PaneId, Link)> {
+    /// What a click at client `(x, y)` would open, if the link modifier
+    /// is held: a `[plumb]` rule's match, else a URL.
+    fn link_at(&self, x: i32, y: i32) -> Option<Target> {
         if !self.host.mods().contains(LINK_MODS) {
             return None;
         }
-        let id = self.pane_at(x, y)?;
-        let slot = self.panes.get(&id)?;
+        let pane = self.pane_at(x, y)?;
+        let slot = self.panes.get(&pane)?;
         let (col, row) = self
             .renderer
             .cell_at(x - slot.rect.x, y - slot.rect.y, slot.grid);
-        let link = slot.snapshot.as_ref()?.url_at(col, row)?;
-        Some((id, link))
+        let snapshot = slot.snapshot.as_ref()?;
+        let rules = &self.settings.config.plumb;
+        if !rules.is_empty()
+            && let Some(line) = snapshot.line_text(col, row)
+        {
+            // Looking up what's in front costs a process walk: only when a
+            // rule cares.
+            let picky = rules.values().any(|r| r.on != plumb::On::Any);
+            let remote = picky && self.ssh_in(slot).is_some();
+            if let Some(hit) = plumb::hit(rules, remote, &line.text, line.at) {
+                return Some(Target {
+                    pane,
+                    cells: line.cells(hit.range.clone()),
+                    what: Clicked::Plumb(hit),
+                });
+            }
+        }
+        let link = snapshot.url_at(col, row)?;
+        Some(Target {
+            pane,
+            cells: link.cells,
+            what: Clicked::Url(link.url),
+        })
+    }
+
+    /// The `ssh` command line running in front in `slot`, if any.
+    fn ssh_in(&self, slot: &PaneSlot) -> Option<Vec<String>> {
+        let process = jet_pty::foreground(slot.pane.pid()?)?;
+        let argv = jet_config::Command::Line(process.command_line).argv();
+        jet_core::ssh_target(&argv).map(|_| argv)
+    }
+
+    /// Where `slot`'s shell last said it was, when that's another host.
+    fn remote_dir<'s>(&self, slot: &'s PaneSlot) -> Option<&'s str> {
+        slot.location
+            .as_ref()
+            .filter(|l| {
+                l.host
+                    .as_deref()
+                    .is_some_and(|h| !h.eq_ignore_ascii_case(&self.local_host))
+            })
+            .map(|l| l.path.as_str())
+    }
+
+    fn click_target(&mut self, target: Target) {
+        match target.what {
+            Clicked::Url(url) => self.host.open_url(&url),
+            Clicked::Plumb(hit) => {
+                if let Err(err) = self.plumb(target.pane, &hit) {
+                    eprintln!("jet: plumb.{}: {err}", hit.rule);
+                }
+            }
+        }
+    }
+
+    /// Do what `hit`'s rule says with the text it matched in `pane`.
+    fn plumb(&mut self, pane: PaneId, hit: &plumb::Hit) -> Result<(), BoxError> {
+        let config = &self.settings.config;
+        let rule = config.plumb.get(&hit.rule).ok_or("the rule is gone")?;
+        let action = rule.action().ok_or("no action")?;
+        let slot = self.panes.get(&pane).ok_or("the pane is gone")?;
+        let ssh = self.ssh_in(slot);
+        let remote_dir = ssh.as_ref().and_then(|_| self.remote_dir(slot));
+        let local_dir = slot
+            .cwd
+            .clone()
+            .filter(|d| d.is_dir())
+            .or_else(|| slot.pane.pid().and_then(jet_pty::process_cwd));
+        let cwd = match (&ssh, remote_dir, &local_dir) {
+            (Some(_), dir, _) => dir.unwrap_or_default().to_owned(),
+            (None, _, dir) => dir
+                .as_ref()
+                .map(|d| d.display().to_string())
+                .unwrap_or_default(),
+        };
+        let host = slot
+            .context
+            .as_ref()
+            .and_then(jet_core::Context::host)
+            .map(str::to_owned)
+            .or_else(|| slot.location.as_ref().and_then(|l| l.host.clone()))
+            .unwrap_or_else(|| self.local_host.clone());
+        let var = |name: &str| match name {
+            "cwd" => Some(cwd.clone()),
+            "host" => Some(host.clone()),
+            _ => hit.vars.get(name).cloned(),
+        };
+        // Filled a word at a time: matched text never becomes more words.
+        let fill = |words: Vec<String>| -> Result<Vec<String>, BoxError> {
+            let filled = words.iter().map(|w| plumb::fill(w, var));
+            Ok(filled.collect::<Result<_, _>>()?)
+        };
+        match action {
+            plumb::Action::Open(url) => {
+                let url = plumb::fill(url, var)?;
+                // Only what can't run a program hidden behind the text.
+                let scheme = url.split_once(':').map(|(s, _)| s.to_ascii_lowercase());
+                if !matches!(scheme.as_deref(), Some("http" | "https" | "mailto")) {
+                    return Err(format!("{url:?} isn't an http(s) or mailto URL").into());
+                }
+                self.host.open_url(&url);
+            }
+            plumb::Action::Run(command) => {
+                run_detached(&fill(command.argv())?, local_dir.as_deref())?;
+            }
+            plumb::Action::View(command, place) => {
+                let words = fill(command.argv())?;
+                let argv = match &ssh {
+                    Some(ssh) => {
+                        let line = words
+                            .iter()
+                            .map(|w| status::sh_quote(w))
+                            .collect::<Vec<_>>();
+                        status::ssh_again(ssh, remote_dir, Some(&line.join(" ")))
+                            .ok_or("not an ssh command line")?
+                    }
+                    None => words,
+                };
+                let command = Some(jet_config::Command::Argv(argv));
+                let side = match place {
+                    plumb::Place::Right => Direction::Right,
+                    plumb::Place::Down => Direction::Down,
+                    plumb::Place::Left => Direction::Left,
+                    plumb::Place::Up => Direction::Up,
+                    plumb::Place::Tab => {
+                        self.open_tab(local_dir, None, command)?;
+                        return Ok(());
+                    }
+                };
+                self.open_split(pane, side, local_dir, None, command)?;
+            }
+        }
+        Ok(())
     }
 
     /// Underline the URL under the mouse, or stop: the mouse moved or the
@@ -2976,6 +3849,9 @@ impl<H: Host> App<H> {
             Timer::Config => {
                 self.reload_config(false);
                 self.poll_session();
+                if self.saved_at.elapsed() >= SESSION_EVERY {
+                    self.save_session(false);
+                }
             }
             Timer::Flash => {
                 self.host.kill_timer(Timer::Flash);
@@ -3023,11 +3899,16 @@ impl<H: Host> App<H> {
             return;
         }
         self.last_bell = Some(now);
-        if self.focused {
+        let bell = &self.settings.config.terminal.bell;
+        let (flash, attention) = (bell.contains(&Bell::Flash), bell.contains(&Bell::Attention));
+        if bell.contains(&Bell::Sound) {
+            self.host.beep();
+        }
+        if self.focused && flash {
             self.renderer.set_flash(Some(FLASH));
             self.render();
             self.host.set_timer(Timer::Flash, FLASH_FOR);
-        } else {
+        } else if !self.focused && attention {
             self.host.request(WindowRequest::Attention);
         }
     }
@@ -3037,6 +3918,161 @@ impl<H: Host> App<H> {
 /// configured font couldn't be used, if it couldn't.
 /// The first pane's id; later ones count up from it.
 const FIRST_PANE: PaneId = 1;
+
+/// The first shell, started before the window: on macOS the event loop and
+/// window take ~150 ms, which the shell's own startup can use. Its wakes go
+/// nowhere until [`App::new`] takes it.
+/// What a window opens with, got ready before it.
+#[derive(Default)]
+pub struct Start {
+    early: Option<EarlyShell>,
+    session: Option<Session>,
+    first: First,
+}
+
+/// What the first tab runs: from the command line, a restored session, or
+/// the config's default profile.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct First {
+    pub cwd: Option<PathBuf>,
+    pub profile: Option<String>,
+    /// Over the profile's command.
+    pub command: Option<Vec<String>>,
+}
+
+pub const USAGE: &str = "usage: jet [DIR] [--profile NAME] [-e COMMAND [ARGS...]]
+       jet quake
+       jet config check
+       jet --version";
+
+impl First {
+    /// `jet [DIR] [--profile NAME] [-e COMMAND...]`: everything after `-e`
+    /// is the command.
+    pub fn parse(args: &[String]) -> Result<Self, String> {
+        let mut first = Self::default();
+        let mut args = args.iter();
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "-e" => {
+                    let argv: Vec<String> = args.by_ref().cloned().collect();
+                    if argv.is_empty() {
+                        return Err("-e needs a command".into());
+                    }
+                    first.command = Some(argv);
+                }
+                "--profile" => {
+                    let name = args.next().ok_or("--profile needs a name")?;
+                    first.profile = Some(name.clone());
+                }
+                flag if flag.starts_with('-') => return Err(format!("unknown option {flag}")),
+                dir => {
+                    if first.cwd.is_some() {
+                        return Err(format!("one directory only, not {dir} too"));
+                    }
+                    let path = std::path::absolute(dir).map_err(|e| format!("{dir}: {e}"))?;
+                    if !path.is_dir() {
+                        return Err(format!("{dir} isn't a directory"));
+                    }
+                    first.cwd = Some(path);
+                }
+            }
+        }
+        Ok(first)
+    }
+
+    /// Its command, else its profile's.
+    fn launch<'a>(&'a self, config: &'a Config) -> (Option<PathBuf>, Option<jet_config::Command>) {
+        let (cwd, profiled) = launch(config, self.cwd.clone(), self.profile.as_deref());
+        let asked = self.command.clone().map(jet_config::Command::Argv);
+        (cwd, asked.or_else(|| profiled.cloned()))
+    }
+}
+
+impl Start {
+    /// The saved session, when it's to be restored, and its first shell
+    /// started early. A shell that fails here is retried, and reported, by
+    /// the window's own spawn.
+    /// `asked`: what the command line said, which skips restoring.
+    pub fn new(config: &Config, quake: bool, asked: First) -> Self {
+        let restore = config.window.restore && !quake && asked == First::default();
+        let session = restore.then(Session::load).flatten();
+        let first = match &session {
+            Some(session) => {
+                let (cwd, profile) = session.first();
+                First {
+                    cwd,
+                    profile,
+                    command: None,
+                }
+            }
+            None => {
+                let quake = quake.then(|| config.quake.profile.clone()).flatten();
+                let default = quake
+                    .or_else(|| config.window.profile.clone())
+                    .or_else(|| config.shell.profile.clone());
+                // `-e` without --profile runs in the plain shell's place.
+                let default = default.filter(|_| asked.command.is_none());
+                First {
+                    profile: asked.profile.or(default),
+                    ..asked
+                }
+            }
+        };
+        let early = EarlyShell::start(config, &first).ok();
+        Self {
+            early,
+            session,
+            first,
+        }
+    }
+}
+
+struct EarlyShell {
+    pane: Pane,
+    /// The restored session's first, else the default shell.
+    profile: Option<String>,
+    wake: Arc<OnceLock<Arc<dyn Fn() + Send + Sync>>>,
+}
+
+impl EarlyShell {
+    fn start(config: &Config, first: &First) -> Result<Self, BoxError> {
+        let wake: Arc<OnceLock<Arc<dyn Fn() + Send + Sync>>> = Arc::default();
+        let relay = Arc::clone(&wake);
+        let relay: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            if let Some(wake) = relay.get() {
+                wake();
+            }
+        });
+        // The cell size waits on the fonts; App::new sends the real one.
+        let size = Size {
+            cols: config.window.columns,
+            rows: config.window.rows,
+            cell_width: 8,
+            cell_height: 16,
+        };
+        let socket = cli_transport::address_for(std::process::id());
+        let env = pane_env(&socket, FIRST_PANE);
+        let (cwd, command) = first.launch(config);
+        let pane = spawn_shell(size, relay, config, cwd, command.as_ref(), &env)?;
+        Ok(Self {
+            pane,
+            profile: first.profile.clone(),
+            wake,
+        })
+    }
+}
+
+/// Where a shell from profile `name` starts (its own directory over `cwd`)
+/// and what it runs.
+fn launch<'a>(
+    config: &'a Config,
+    cwd: Option<PathBuf>,
+    name: Option<&str>,
+) -> (Option<PathBuf>, Option<&'a jet_config::Command>) {
+    let profile = name.and_then(|name| config.profiles.get(name));
+    let cwd = profile.and_then(|p| p.cwd.clone()).or(cwd);
+    (cwd, profile.and_then(|p| p.command.as_ref()))
+}
 
 /// A PTY of `grid` cells of `m`'s size.
 fn pty_size(grid: (u16, u16), m: jet_font::CellMetrics) -> Result<Size, BoxError> {
@@ -3094,6 +4130,17 @@ fn load_fonts(
     Ok((fonts, problem))
 }
 
+/// `jet 0.1.0 (x86_64-windows, libghostty-vt 1.2.3)`.
+fn version() -> String {
+    let vt = libghostty_vt::build_info::version_string().unwrap_or_default();
+    format!(
+        "jet {} ({}-{}, libghostty-vt {vt})",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::ARCH,
+        std::env::consts::OS
+    )
+}
+
 fn make_renderer(
     gpu: &Gpu,
     format: wgpu::TextureFormat,
@@ -3105,7 +4152,16 @@ fn make_renderer(
     let padding = (config.window.padding as f32 * scale).round() as u32;
     let mut renderer = Renderer::new(&gpu.device, &gpu.queue, format, fonts, padding);
     renderer.set_opacity(config.window.opacity);
+    renderer.set_selection(selection(config));
     renderer
+}
+
+fn selection(config: &Config) -> jet_render::Selection {
+    let colors = &config.colors;
+    jet_render::Selection {
+        background: colors.selection_background.map(|c| c.0),
+        foreground: colors.selection_foreground.map(|c| c.0),
+    }
 }
 
 const BANNER_BG: Rgb = Rgb {
@@ -3155,6 +4211,32 @@ fn banner(problems: &[&str], (cols, rows): (u16, u16)) -> Vec<Arc<Line>> {
 /// platform's: the first of pwsh, Windows PowerShell and cmd that starts,
 /// or the login shell (`$SHELL`, else the account's), run as one so its
 /// profile sets `PATH` even for an app opened from Finder.
+/// Start `argv` in the background, in `cwd`, with nothing attached (and
+/// no console window on Windows).
+fn run_detached(argv: &[String], cwd: Option<&std::path::Path>) -> Result<(), BoxError> {
+    let (program, args) = argv.split_first().ok_or("nothing to run")?;
+    let mut command = std::process::Command::new(program);
+    command
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = command.spawn()?;
+    std::thread::Builder::new()
+        .name("jet-plumb".into())
+        .spawn(move || child.wait())?;
+    Ok(())
+}
+
 fn spawn_shell(
     size: Size,
     wake: Arc<dyn Fn() + Send + Sync>,
@@ -3167,15 +4249,22 @@ fn spawn_shell(
         let wake = Arc::clone(&wake);
         move || wake()
     };
-    let options = |command| PaneOptions {
-        command: Command {
+    let options = |command| {
+        let command = Command {
             cwd: cwd.clone(),
             env: env.iter().map(|(k, v)| (k.into(), v.into())).collect(),
             ..command
-        },
-        size,
-        max_scrollback: config.terminal.scrollback,
-        settings: config.vt_settings(),
+        };
+        PaneOptions {
+            command: if config.shell.integration {
+                integration::inject(command)
+            } else {
+                command
+            },
+            size,
+            scrollback: config.terminal.scrollback,
+            settings: config.vt_settings(),
+        }
     };
     let flag: Vec<String> = std::env::args()
         .skip_while(|arg| arg != "-e")
@@ -3298,6 +4387,9 @@ fn progress_event(progress: Progress) -> What {
 impl<H: Host> Drop for App<H> {
     /// A closed window's socket would otherwise outlive it on Unix.
     fn drop(&mut self) {
+        // Its shells are still running: closing the window is what ends
+        // them, after this.
+        self.save_session(true);
         if self.cli.is_some() {
             cli_transport::forget(&self.socket);
         }
@@ -3330,4 +4422,32 @@ fn local_names() -> (String, String) {
         .unwrap_or_default()
         .to_lowercase();
     (user, host)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::app::First;
+
+    fn parse(args: &[&str]) -> Result<First, String> {
+        First::parse(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn the_command_line_picks_the_first_tab() {
+        let dir = std::env::temp_dir();
+        let dir_arg = dir.to_string_lossy().into_owned();
+        let first = parse(&[&dir_arg, "--profile", "bash", "-e", "htop", "-d", "5"]);
+        assert_eq!(
+            first,
+            Ok(First {
+                cwd: Some(std::path::absolute(&dir).unwrap_or(dir.clone())),
+                profile: Some("bash".into()),
+                command: Some(vec!["htop".into(), "-d".into(), "5".into()]),
+            })
+        );
+        assert_eq!(parse(&[]), Ok(First::default()));
+        assert!(parse(&["-e"]).is_err());
+        assert!(parse(&["--nope"]).is_err());
+        assert!(parse(&["/no/such/dir/here"]).is_err());
+    }
 }

@@ -2,97 +2,196 @@
 
 # jet
 
-A fast, native terminal for Windows, macOS and Linux, written in Rust on
-[libghostty-vt](https://ghostty.org): Ghostty's terminal emulation under a
-renderer, window and app shell of its own.
+A fast, native terminal for Windows, macOS and Linux, and **jetmux**, a
+multiplexer whose sessions jet shows as its own tabs and splits. Rust on
+[libghostty-vt](https://ghostty.org): Ghostty's terminal emulation, with
+jet's own renderer, windowing and app shell.
 
 ![jet on Windows](docs/screenshots/windows.png)
 
 ![jet on macOS](docs/screenshots/macos.png)
 
-## Features
+## jet
 
 - **Ghostty's emulation:** parsing, scrollback, reflow, the Kitty keyboard
-  protocol and mouse reporting come from libghostty-vt.
-- **GPU rendering** with wgpu (DirectX 12, Metal, Vulkan), ligatures, color
-  emoji and fallback fonts for everything else.
-- **Tabs and splits**, with profiles for different shells, opened from
-  keybinds or the CLI. A split can zoom to fill its tab.
-- **Search** through a pane's screen and history as you type
-  (`ctrl+shift+f`, `cmd+f`), and a **command palette** (`ctrl+shift+p`,
-  `cmd+shift+p`) for every action, profile and tab.
-- **Window styling:** jet's own title bar with the tabs in it, background
-  opacity, and on Windows Mica/Acrylic backdrops, corner and border styles.
-- **Status segments** in the title bar, tab bar or a row of their own:
-  `ssh` host, directory, running program, progress, or anything a script
-  sets with OSC 1337 (`{var.k8s}`).
-- **Quake mode:** `jet quake` drops a window down from a global hotkey on
-  Windows and macOS. On Linux, bind `jet quake` in your desktop's shortcuts:
-  running it again toggles the window (X11 or XWayland).
-- **`jet-cli`** drives running windows from scripts: spawn tabs, split,
+  protocol and mouse reporting come from libghostty-vt. Images with the
+  Kitty graphics protocol.
+- **GPU rendering** with wgpu (DirectX 12, Metal, Vulkan): ligatures, color
+  emoji, fallback fonts. Ghostty's ~900 themes built in, previewed live from
+  the palette.
+- **Tabs, splits and profiles** (named shells, or `ssh` straight into a
+  box), with zoom, resize and a **command palette** for every action. Right
+  click the tab bar for a profile menu; separate default profiles for new
+  windows, quake and new tabs.
+- **Safe by default:** asks before closing a tab or window with something
+  running, and before pasting lines a prompt would run (not into programs
+  with bracketed paste).
+- **Search** (text or regex) over screen and history, **copy mode** with vi
+  keys, and **quick select** for URLs, paths and hashes.
+- **Shell integration** for bash, zsh and PowerShell, set up without
+  touching your dotfiles: directory reports (OSC 7), prompt marks (OSC 133)
+  for jump-to-prompt, copying the last output and showing its exit status.
+- **Status segments** in the title bar, tab bar or a row: `{user}@{host}`,
+  `{dir}`/`{cwd}`, the running program, progress, git or k8s context from a
+  script (`{var.NAME}`). They follow ssh and sudo. See
+  [docs/status.md](docs/status.md).
+- **Plumbing:** Ctrl+click text a regex matches (it underlines while Ctrl is
+  held) to open a URL, run a program, or open a split on the box the pane
+  is ssh'd into. `file:line` to your editor, hashes to `git show`.
+- **Follow ssh:** a new tab from a pane running `ssh` (or `wsl.exe`) lands on
+  the same host in the same directory.
+- **Quake window:** a global hotkey (`ctrl+space`, `ctrl+grave` on macOS)
+  drops a window from any edge or fraction of the screen. On Windows it
+  starts at sign-in by default, with its own profile, optionally over the
+  taskbar.
+- **Session restore**, desktop **notifications** (OSC 9/777), taskbar
+  **progress** (OSC 9;4), **clipboard writes** (OSC 52, never reads),
+  hyperlinks (OSC 8).
+- **Window styling:** jet's own title bar with the tabs in it, opacity, and
+  on Windows Mica/Acrylic, corners and border colors.
+- **`jet-cli`** drives running windows from scripts: open tabs and splits,
   send and read text, set titles and status variables, stream events.
-- **Shell integration:** working directory reports (OSC 7, 9;9), prompt
-  marks (OSC 133) with jump-to-prompt, copying the last command's output and
-  its exit status in the status bar, hyperlinks (OSC 8) and URL clicks,
-  clipboard writes (OSC 52), synchronized output, taskbar progress (OSC 9;4).
-- **Images** with the Kitty graphics protocol.
-- **Desktop notifications** programs ask for (OSC 9, OSC 777).
-- **Ghostty config passthrough:** an existing Ghostty config, themes and
-  keybinds work as-is.
+- **Ghostty config passthrough:** an existing Ghostty config, its themes
+  and `keybind` lines work as they are.
+
+## jetmux
+
+A tmux-style daemon that owns the shells, so sessions outlive any client.
+
+- **Shown by jet as native tabs:** a profile with `jetmux = { host = ... }`
+  runs `ssh host jetmux proxy` and turns the session's tabs and splits into
+  jet's, drawn by jet in your theme. Closing a tab closes it on the host;
+  `detach` (palette or a keybind) leaves the session running. Quitting jet
+  leaves it running too.
+- **A terminal client** (`jetmux attach`) for any other terminal, with a
+  prefix key (`C-b`), a status bar sharing jet's segments, copy mode and a
+  palette.
+- **Survives restarts:** `jetmux upgrade` replaces the daemon without losing
+  a process; `snapshot`/`restore` bring sessions back after a reboot, shells
+  in their old directories with the last command typed but not run.
+- **Profiles:** named layouts (tabs, splits, commands, env) that
+  `jetmux up NAME` creates or attaches to.
+- **Roaming:** `jetmux remote host` is a mosh-style UDP link that survives
+  sleep and network changes, with predictive echo on slow links.
+- **Scripting:** `jetmux pane send-keys/capture/wait`, command blocks, JSON
+  events, and a socket API.
+- **Companions:** `jetmux-web` (browser and phone client, via `tailscale
+  serve`), `jetmux-notify` (desktop, webhook and web push alerts for app
+  notifications and slow commands), `jetmux-mcp` (an MCP server for
+  agents), `jetmux-rec` (asciicast recording and playback).
+- **One config:** jetmux reads jet's `[jetmux]`, `[theme]`, `[colors]` and
+  `[status]`, then its own `~/.config/jetmux/config.toml` on top. See
+  [docs/jetmux.toml](docs/jetmux.toml).
 
 ## Install
 
-Releases carry builds for Windows (x86_64), macOS (Apple Silicon) and
-Linux (x86_64, glibc 2.35+). The x86_64 builds need a CPU with AVX2
-(x86-64-v3: Intel Haswell or AMD Zen and newer).
+|             |                                                                                                                                                                                                                                                                                                                     |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Windows** | The `.msi` (per-user, no admin: Start Menu, PATH, upgrades in place), or Scoop: `scoop install https://github.com/jpetrucciani/jet/releases/latest/download/jet.json`, then `scoop update jet`. Or unzip anywhere, keeping `conpty.dll` and `OpenConsole.exe` beside `jet.exe` (a newer ConPTY than Windows ships). |
+| **macOS**   | Move `jet.app` to Applications. Not notarized yet: allow it under Privacy & Security, or `xattr -dr com.apple.quarantine /Applications/jet.app`.                                                                                                                                                                    |
+| **Linux**   | Put `jet` and `jet-cli` on `PATH`. Needs Vulkan (or GL) and Wayland or X11, glibc 2.35+.                                                                                                                                                                                                                            |
+| **jetmux**  | Static binaries for any x86_64 Linux: untar onto `PATH` on each server.                                                                                                                                                                                                                                             |
+| **Nix**     | `import ./jet { }` gives `jetmux`, `jetmux-static` and `homeManagerModules.default` (`programs.jet`, `programs.jetmux`, with a systemd user service).                                                                                                                                                               |
 
-- **Windows:** unzip anywhere and run `jet.exe`. Keep `conpty.dll` and
-  `OpenConsole.exe` beside it; they're a newer ConPTY than Windows ships.
-- **macOS:** unzip and move `jet.app` to Applications. It isn't notarized
-  yet, so macOS blocks the first launch: allow it under System Settings,
-  Privacy & Security, or run `xattr -dr com.apple.quarantine /Applications/jet.app`.
-- **Linux:** untar and put `jet` and `jet-cli` on your `PATH`. Needs Vulkan
-  (or GL) and Wayland or X11.
+jet's x86_64 builds need AVX2 (x86-64-v3: Intel Haswell, AMD Zen or newer).
+jetmux's run on any x86_64.
 
 ## Configure
 
-`~/.jet/config.toml` (or `%APPDATA%\jet\config.toml`,
-`~/.config/jet/config.toml`). Every key, with its default and allowed
-values, is in [docs/config.toml](docs/config.toml). Changes apply on save;
-`jet config check` shows what was read and what's wrong.
+jet reads the first of `$JET_CONFIG`, `~/.jet/config.toml`, then
+`%APPDATA%\jet\config.toml` (Windows) or `~/.config/jet/config.toml`.
+Every key with its default is in [docs/config.toml](docs/config.toml).
+Changes apply on save; `jet config check` shows what was read and what's
+wrong. In the palette, **Open config** opens it (`$EDITOR` in a new tab, else
+the system's editor), starting a missing one as that file commented out, and
+**Choose theme** previews themes as you move and writes the one you pick.
+
+`jet [DIR] [--profile NAME] [-e COMMAND ARGS...]` opens a window there or
+running that; `jet quake` the drop-down window.
 
 ```toml
+include = ["local.toml"] # per-machine overrides; fine if missing
+
 [font]
 family = "JetBrains Mono"
 size = 13
 
 [theme]
-name = "Poimandres"         # any Ghostty theme
+name = "Dracula+ High Contrast" # any Ghostty theme
 
 [window]
-decorations = "custom"      # jet's title bar, with the tabs in it
+decorations = "custom" # jet's title bar, tabs in it
+
+[shell] # Windows default: pwsh, else powershell
+command = ["C:/Program Files/Git/bin/bash.exe", "-l"]
+# profile = "bash"                  # new tabs and splits; [window] profile
+# and [quake] profile for first tabs
+
+[profiles.voyager]
+command = "ssh voyager"
+
+[profiles.dev] # a jetmux session as jet tabs
+jetmux = { host = "voyager", session = "main", up = "dev" }
+
+[[status.segments]]
+text = "{user}@{host}"
+[[status.segments]]
+text = "{dir}"
+
+[quake]
+x = 0.0
+width = 0.3 # the left 30%, full height
+height = 1.0
+
+[plumb.code] # Ctrl+click file:line
+match = '(?<file>[\w./-]+\.\w+):(?<line>\d+)'
+run = ["code", "--goto", "{file}:{line}"]
 
 [keybinds]
-"ctrl+shift+d" = "new_split:right"
+"ctrl+alt+v" = "new_tab:voyager"
+"ctrl+alt+m" = "new_tab:dev"
+"ctrl+enter" = 'text:\r'
 ```
 
-Status segments: [docs/status.md](docs/status.md).
+Default keys (macOS uses Command chords instead; all in docs/config.toml):
+
+| Keys                                               | Action                                  |
+| -------------------------------------------------- | --------------------------------------- |
+| `ctrl+shift+c` / `v`                               | copy / paste                            |
+| `ctrl+t`, `ctrl+shift+w`                           | new tab, close split or tab             |
+| `ctrl+tab`, `alt+1..9`                             | next tab, go to tab                     |
+| `ctrl+shift+o` / `e`                               | split right / down                      |
+| `ctrl+alt+arrows`, `ctrl+shift+alt+arrows`         | move between / resize splits            |
+| `ctrl+shift+enter`                                 | zoom split                              |
+| `ctrl+shift+f`, `ctrl+shift+x`, `ctrl+shift+space` | search, copy mode, quick select         |
+| `ctrl+shift+p`                                     | command palette                         |
+| `ctrl+shift+page_up` / `down`                      | previous / next prompt                  |
+| `ctrl+=`, `ctrl+-`, `ctrl+0`                       | font size                               |
+| `ctrl+shift+alt+d`                                 | detach the jetmux session in front      |
+| right click the tab bar                            | new tab from a profile (`new_tab_menu`) |
 
 ## Build
 
-Everything builds from the Nix dev shell (`nix-shell`, or direnv), with
-pinned Rust, Zig and libghostty. Windows binaries cross-compile from Linux.
+Everything builds in the Nix dev shell (`nix-shell` or direnv), with pinned
+Rust, Zig and libghostty. Windows binaries cross-compile from Linux.
+`cargo run -p jet` and `cargo run -p jetmux` work natively.
 
-| Command | Does |
-| --- | --- |
-| `check` | fmt, clippy and tests (what CI runs on Linux and macOS) |
-| `build_win` / `check_win` | cross-compile for Windows / clippy the Windows code |
-| `bundle_mac` | `target/release/jet.app`, on a Mac |
-| `dist_linux`, `dist_win`, `dist_mac` | release archives in `target/dist`, profile-guided |
-| `pgo` | record the PGO profile `dist_linux` and `dist_mac` build with |
-| `pgo_win_bundle` | an instrumented Windows build to record `dist_win`'s profile with: run its `run.cmd` on Windows, copy `raw/` to `target/pgo/win-raw` |
+| Command                              | Does                                                                                                                     |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| `check`                              | fmt, clippy, tests (CI on Linux and macOS)                                                                               |
+| `check_win`                          | clippy the Windows build (CI)                                                                                            |
+| `check_web`                          | web UI types match the Rust ones, typecheck, build (CI)                                                                  |
+| `build_win`                          | cross-compile every binary for Windows                                                                                   |
+| `bundle_mac`                         | `target/release/jet.app`, on a Mac                                                                                       |
+| `jetmux_ts`, `jetmux_web_build`      | regenerate the web UI's types, build it                                                                                  |
+| `dist_linux`, `dist_win`, `dist_mac` | jet release archives in `target/dist`, profile-guided (Windows: zip and MSI, signed when `JET_SIGN_TOKEN` is set)        |
+| `update_themes --release TAG`        | refresh the built-in themes from an iTerm2-Color-Schemes release                                                         |
+| `win_manifests`                      | Scoop's `jet.json` and winget's manifests for the release in `target/dist`                                               |
+| `dist_jetmux`                        | jetmux's static release tarball                                                                                          |
+| `pgo`, `pgo_win_bundle`              | record the profiles the dist builds use (Windows: run the bundle's `run.cmd` there, copy `raw/` to `target/pgo/win-raw`) |
 
-`cargo run -p jet` runs it natively on Linux and macOS.
+Releases: bumping `[workspace.package] version` on main builds every
+archive and publishes `v<version>`.
 
 ## License
 

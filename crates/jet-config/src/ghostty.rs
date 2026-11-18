@@ -85,7 +85,11 @@ pub(crate) fn translate(pairs: &[(String, String)]) -> (Table, Vec<String>) {
                 }
                 _ => false,
             },
-            "background" | "foreground" | "cursor-color" => color()
+            "background"
+            | "foreground"
+            | "cursor-color"
+            | "selection-background"
+            | "selection-foreground" => color()
                 .map(|c| {
                     let name = key.strip_suffix("-color").unwrap_or(key);
                     set(&mut out, "colors", name, c);
@@ -166,6 +170,33 @@ pub(crate) fn translate(pairs: &[(String, String)]) -> (Table, Vec<String>) {
                 on.map(|on| set(&mut out, "terminal", "copy-on-select", Value::Boolean(on)))
                     .is_some()
             }
+            "clipboard-paste-protection" => value
+                .parse()
+                .map(|on| set(&mut out, "terminal", "paste-protection", Value::Boolean(on)))
+                .is_ok(),
+            "confirm-close-surface" => {
+                // `always` asks even at a prompt; jet asks when it matters.
+                let on = match value.as_str() {
+                    "true" | "always" => Some(true),
+                    "false" => Some(false),
+                    _ => None,
+                };
+                on.map(|on| set(&mut out, "window", "confirm-close", Value::Boolean(on)))
+                    .is_some()
+            }
+            "unfocused-split-opacity" => value
+                .parse::<f64>()
+                .map(|o| {
+                    // Ghostty clamps to 0.15..=1.
+                    let o = o.clamp(0.15, 1.0);
+                    set(
+                        &mut out,
+                        "window",
+                        "unfocused-split-opacity",
+                        Value::Float(o),
+                    );
+                })
+                .is_ok(),
             _ => false,
         };
         if !ok {

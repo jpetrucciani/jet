@@ -11,8 +11,11 @@ jet-core.workspace = true
 jet-font.workspace = true
 jet-pty.workspace = true
 jet-render.workspace = true
+jetmux-proto = { path = "../jetmux-proto" }
 libghostty-vt.workspace = true
 resvg.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 wgpu.workspace = true
 
 [target.'cfg(windows)'.dependencies]

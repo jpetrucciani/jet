@@ -7,6 +7,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use jetmux_proto::CopyAction;
+use jetmux_proto::input::{self, KeyEvent, MouseEvent, Theme};
+use jetmux_proto::pane::{Context, Location, Notification, Progress};
 use libghostty_vt::fmt::{Format, Formatter, FormatterOptions};
 use libghostty_vt::render::{CellIterator, CursorVisualStyle, Dirty, RowIterator};
 use libghostty_vt::screen::{
@@ -23,11 +26,14 @@ use libghostty_vt::terminal::{
 use libghostty_vt::{RenderState, Terminal, TerminalOptions, focus, key, mouse, selection};
 
 use crate::Error;
+use crate::blocks::{Blocks, Mark};
+use crate::copy::{self, CopyMode, CopyOutcome};
+use crate::grab::{Grabbed, QuickSelect};
 use crate::images;
-use crate::osc::{self, Notification, Progress};
+use crate::osc::{self, PointerShape, find_esc};
 use crate::search::Search;
 use crate::snapshot::{
-    Cell, CellFlags, Colors, Cursor, CursorShape, Line, Rgb, Snapshot, Underline, Width,
+    Cell, CellFlags, Colors, Cursor, CursorShape, Line, Picture, Rgb, Snapshot, Underline, Width,
 };
 
 /// A key press or release from the window, before encoding. Encoding happens
@@ -61,6 +67,101 @@ pub struct VtSettings {
     /// Programs may set the clipboard (OSC 52, iTerm2's OSC 1337 Copy).
     /// Reading it is never allowed.
     pub clipboard_write: bool,
+}
+
+impl KeyInput {
+    /// A key as a client sent it.
+    pub fn from_wire(event: &KeyEvent) -> Self {
+        Self {
+            key: key::Key::try_from(event.key).unwrap_or(key::Key::Unidentified),
+            action: match event.action {
+                input::KeyAction::Press => key::Action::Press,
+                input::KeyAction::Release => key::Action::Release,
+                input::KeyAction::Repeat => key::Action::Repeat,
+            },
+            mods: key::Mods::from_bits_retain(event.mods),
+            text: event.text.clone(),
+            unshifted: event.unshifted,
+        }
+    }
+
+    pub fn to_wire(&self) -> KeyEvent {
+        KeyEvent {
+            key: u32::from(self.key),
+            action: match self.action {
+                key::Action::Release => input::KeyAction::Release,
+                key::Action::Repeat => input::KeyAction::Repeat,
+                _ => input::KeyAction::Press,
+            },
+            mods: self.mods.bits(),
+            text: self.text.clone(),
+            unshifted: self.unshifted,
+        }
+    }
+}
+
+impl MouseInput {
+    /// A mouse event as a client sent it, in cells, for a terminal with
+    /// cells `cell` pixels in size.
+    pub fn from_wire(event: &MouseEvent, (cw, ch): (u32, u32)) -> Self {
+        let button = |b| match b {
+            input::MouseButton::Left => MouseButton::Left,
+            input::MouseButton::Middle => MouseButton::Middle,
+            input::MouseButton::Right => MouseButton::Right,
+        };
+        Self {
+            action: match event.action {
+                input::MouseAction::Press(b) => MouseAction::Press(button(b)),
+                input::MouseAction::Release(b) => MouseAction::Release(button(b)),
+                input::MouseAction::Move => MouseAction::Move,
+            },
+            x: f64::from(event.x) * f64::from(cw.max(1)),
+            y: f64::from(event.y) * f64::from(ch.max(1)),
+            mods: key::Mods::from_bits_retain(event.mods),
+        }
+    }
+
+    /// This event over `pane`, with cells `cell` pixels in size.
+    pub fn to_wire(&self, pane: u32, (cw, ch): (u32, u32)) -> MouseEvent {
+        let button = |b| match b {
+            MouseButton::Left => input::MouseButton::Left,
+            MouseButton::Middle => input::MouseButton::Middle,
+            MouseButton::Right => input::MouseButton::Right,
+        };
+        MouseEvent {
+            pane,
+            action: match self.action {
+                MouseAction::Press(b) => input::MouseAction::Press(button(b)),
+                MouseAction::Release(b) => input::MouseAction::Release(button(b)),
+                MouseAction::Move => input::MouseAction::Move,
+            },
+            x: (self.x / f64::from(cw.max(1))) as f32,
+            y: (self.y / f64::from(ch.max(1))) as f32,
+            mods: self.mods.bits(),
+        }
+    }
+}
+
+impl VtSettings {
+    /// These settings in a client's colors.
+    pub fn with_theme(self, theme: &Theme) -> Self {
+        Self {
+            foreground: theme.foreground.into(),
+            background: theme.background.into(),
+            cursor: theme.cursor.map(Into::into),
+            palette: theme.palette.iter().map(|&(i, c)| (i, c.into())).collect(),
+            ..self
+        }
+    }
+
+    pub fn theme(&self) -> Theme {
+        Theme {
+            foreground: self.foreground.into(),
+            background: self.background.into(),
+            cursor: self.cursor.map(Into::into),
+            palette: self.palette.iter().map(|&(i, c)| (i, c.into())).collect(),
+        }
+    }
 }
 
 impl Default for VtSettings {
@@ -107,30 +208,29 @@ pub struct Effects {
     pub notifications: Vec<Notification>,
     /// Commands that finished (OSC 133;D), with their exit status.
     pub finished: Vec<Option<i32>>,
+    /// The mouse pointer asked for (OSC 22), the last since the previous
+    /// take.
+    pub pointer: Option<PointerShape>,
+    /// The innermost context (OSC 3008), when it changed: `Some(None)`
+    /// once the last one ended.
+    pub context: Option<Option<Context>>,
+    /// The shell finished drawing a prompt and is reading input (OSC
+    /// 133;B).
+    pub prompt_ready: bool,
 }
 
-/// Where a shell says it is. Over SSH that's the remote host and a path
-/// there, which means nothing locally but is worth showing.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Location {
-    /// From OSC 7's `file://host/...`; none for OSC 9;9 or an empty host.
-    pub host: Option<String>,
-    pub path: String,
-}
-
-impl Location {
-    fn from_report(report: &str) -> Self {
-        let Some(rest) = report.strip_prefix("file://") else {
-            return Self {
-                host: None,
-                path: report.to_owned(),
-            };
+/// Where an OSC 7 or OSC 9;9 report says the shell is.
+pub(crate) fn location_from_report(report: &str) -> Location {
+    let Some(rest) = report.strip_prefix("file://") else {
+        return Location {
+            host: None,
+            path: report.to_owned(),
         };
-        let (host, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
-        Self {
-            host: Some(host.to_owned()).filter(|h| !h.is_empty()),
-            path: percent_decode(path).unwrap_or_else(|| path.to_owned()),
-        }
+    };
+    let (host, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    Location {
+        host: Some(host.to_owned()).filter(|h| !h.is_empty()),
+        path: percent_decode(path).unwrap_or_else(|| path.to_owned()),
     }
 }
 
@@ -152,6 +252,8 @@ struct Answers {
     /// For the color scheme report (CSI ? 996 n): the background is dark.
     dark: bool,
     clipboard_write: bool,
+    /// What XTVERSION reports: name and version.
+    name: &'static str,
 }
 
 /// Lines per wheel notch, like Windows' default.
@@ -203,10 +305,10 @@ pub enum MouseOutcome {
 }
 
 pub struct VtCore {
-    term: Terminal<'static, 'static>,
-    render: RenderState<'static>,
-    rows: RowIterator<'static>,
-    cells: CellIterator<'static>,
+    pub(crate) term: Terminal<'static, 'static>,
+    pub(crate) render: RenderState<'static>,
+    pub(crate) rows: RowIterator<'static>,
+    pub(crate) cells: CellIterator<'static>,
     pending: Rc<RefCell<Pending>>,
     answers: Rc<std::cell::Cell<Answers>>,
     keys: key::Encoder<'static>,
@@ -214,7 +316,7 @@ pub struct VtCore {
     mouse: mouse::Encoder<'static>,
     mouse_event: mouse::Event<'static>,
     /// Pixel size of a cell, as last given to [`VtCore::resize`].
-    cell_size: (u32, u32),
+    pub(crate) cell_size: (u32, u32),
     /// Current viewport; only dirty rows are re-read from the render state.
     grid: Snapshot,
     /// Rows replaced while a snapshot still held them, and rows nobody
@@ -224,18 +326,33 @@ pub struct VtCore {
     rows_free: Vec<Arc<Line>>,
     graphemes: Vec<char>,
     /// Scratch for OSC 8 URIs.
-    uri_buf: Vec<u8>,
+    pub(crate) uri_buf: Vec<u8>,
     /// Kitty graphics images copied out so far.
-    pictures: images::Pictures,
+    pub(crate) pictures: images::Pictures,
     /// The last write ended in ESC, so a leading `c` completes a reset.
     trailing_esc: bool,
     mouse_input: MouseState,
     /// libghostty's palette, which settings override entry by entry.
     builtin_palette: Palette,
+    /// The colors [`VtCore::configure`] last set, to tell apps' changes
+    /// from them.
+    pub(crate) theme: (Palette, VtSettings),
     copy_on_select: bool,
     osc: osc::Scanner,
+    /// Command blocks, while `tracking` (see [`VtCore::track_blocks`]).
+    blocks: Blocks,
+    tracking: bool,
+    /// A 133;B arrived since the last [`VtCore::take_effects`].
+    prompt_ready: bool,
     /// The find bar's search, while it has a query.
-    search: Option<Search>,
+    pub(crate) search: Option<Search>,
+    /// Keys walk and select instead of reaching the program.
+    copy_mode: Option<CopyMode>,
+    /// Keys pick a labeled URL, path or hash instead.
+    quick_select: Option<QuickSelect>,
+    /// Make the next snapshot even if the terminal didn't change (a mode
+    /// started, ended, or a label narrowed).
+    redraw: bool,
 }
 
 /// Selection gestures and mouse buttons. libghostty's gesture state turns
@@ -281,7 +398,14 @@ impl MouseState {
 }
 
 impl VtCore {
-    pub fn new(cols: u16, rows: u16, max_scrollback: usize) -> Result<Self, Error> {
+    /// A terminal keeping about `scrollback` lines of history at this
+    /// width (wider later keeps fewer, narrower more).
+    pub fn new(cols: u16, rows: u16, scrollback: usize) -> Result<Self, Error> {
+        // libghostty budgets history in bytes; a line costs ~9 per cell.
+        const BYTES_PER_CELL: usize = 10;
+        let max_scrollback = scrollback
+            .saturating_mul(usize::from(cols))
+            .saturating_mul(BYTES_PER_CELL);
         let mut term = Terminal::new(TerminalOptions {
             cols,
             rows,
@@ -298,6 +422,7 @@ impl VtCore {
             },
             dark: true,
             clipboard_write: true,
+            name: concat!("jet ", env!("CARGO_PKG_VERSION")),
         }));
         term.on_pty_write({
             let pending = pending.clone();
@@ -335,7 +460,10 @@ impl VtCore {
                 Ok(())
             }
         })?
-        .on_xtversion(|_| Some(concat!("jet ", env!("CARGO_PKG_VERSION"))))?
+        .on_xtversion({
+            let answers = answers.clone();
+            move |_| Some(answers.get().name)
+        })?
         .on_size({
             let answers = answers.clone();
             move |_| Some(answers.get().size)
@@ -373,12 +501,38 @@ impl VtCore {
             trailing_esc: false,
             mouse_input: MouseState::new()?,
             builtin_palette,
+            theme: (builtin_palette, VtSettings::default()),
             copy_on_select: true,
             osc: osc::Scanner::default(),
+            blocks: Blocks::default(),
+            tracking: false,
+            prompt_ready: false,
             search: None,
+            copy_mode: None,
+            quick_select: None,
+            redraw: false,
         };
         vt.configure(&VtSettings::default())?;
         Ok(vt)
+    }
+
+    /// A kitty graphics picture a frame or snapshot showed, by its key.
+    pub fn picture(&self, key: u64) -> Option<Arc<Picture>> {
+        self.pictures.get(key)
+    }
+
+    /// Pixel size of a cell, as last given to [`VtCore::resize`].
+    pub fn cell_size(&self) -> (u32, u32) {
+        self.cell_size
+    }
+
+    /// What XTVERSION (CSI > q) answers, name and version, so apps can
+    /// tell a multiplexer from the terminal it runs in.
+    pub fn set_name(&mut self, name: &'static str) {
+        self.answers.set(Answers {
+            name,
+            ..self.answers.get()
+        });
     }
 
     /// Apply new settings. libghostty marks the screen dirty, so the next
@@ -403,14 +557,70 @@ impl VtCore {
             .set_default_cursor_style(Some(style))?
             .set_default_cursor_blink(Some(settings.cursor_blink))?;
         self.copy_on_select = settings.copy_on_select;
+        self.theme = (palette, settings.clone());
         let Rgb { r, g, b } = settings.background;
         let luma = 0.2126 * f32::from(r) + 0.7152 * f32::from(g) + 0.0722 * f32::from(b);
+        let dark = luma < 128.0;
+        // Mode 2031: apps that asked hear when light and dark flip.
+        if dark != self.answers.get().dark && self.term.mode(Mode::COLOR_SCHEME_REPORT)? {
+            let scheme = if dark {
+                ColorScheme::Dark
+            } else {
+                ColorScheme::Light
+            };
+            let mut buf = [0u8; 16];
+            let n = scheme.encode_report(&mut buf)?;
+            self.pending
+                .borrow_mut()
+                .pty_reply
+                .extend_from_slice(buf.get(..n).unwrap_or_default());
+        }
         self.answers.set(Answers {
-            dark: luma < 128.0,
+            dark,
             clipboard_write: settings.clipboard_write,
             ..self.answers.get()
         });
         Ok(())
+    }
+
+    /// Parse output. Writes are split at each OSC 133 prompt mark, so a
+    /// block records the cursor where its mark falls.
+    pub fn write(&mut self, mut bytes: &[u8]) {
+        while let Some((end, mark)) = self.osc.next_mark(bytes) {
+            self.parse(&bytes[..end]);
+            self.mark(mark);
+            bytes = &bytes[end..];
+        }
+        self.parse(bytes);
+        if let Some(search) = &mut self.search {
+            search.stale = true;
+        }
+    }
+
+    /// Keep command blocks from here on (they cost a little on every
+    /// change to the screen).
+    pub fn track_blocks(&mut self) {
+        self.tracking = true;
+    }
+
+    /// Command blocks so far; none unless tracked.
+    pub fn blocks(&self) -> &Blocks {
+        &self.blocks
+    }
+
+    /// Ids of the blocks that finished since the last call.
+    pub fn take_finished_blocks(&mut self) -> Vec<u64> {
+        self.blocks.take_finished()
+    }
+
+    fn mark(&mut self, mark: Mark) {
+        self.prompt_ready |= mark == Mark::Input;
+        if self.tracking {
+            let mut blocks = std::mem::take(&mut self.blocks);
+            // Only fails reading the screen it was just written to.
+            let _ = blocks.mark(self, mark);
+            self.blocks = blocks;
+        }
     }
 
     /// Mode 2027 is on by default here: a ZWJ sequence, flag or VS16 emoji
@@ -418,19 +628,15 @@ impl VtCore {
     /// libghostty's default is off and a full reset (RIS, `ESC c`) restores
     /// it, so writes are split after each reset to turn it back on before
     /// the rest is parsed. Apps can still switch it off.
-    pub fn write(&mut self, mut bytes: &[u8]) {
+    fn parse(&mut self, mut bytes: &[u8]) {
         if self.trailing_esc && bytes.first() == Some(&b'c') {
             self.term.vt_write(&bytes[..1]);
             self.cluster_graphemes();
             bytes = &bytes[1..];
         }
-        // Hop between ESCs (a vectorized search) looking for `ESC c`.
+        // Hop between ESCs looking for `ESC c`.
         let mut from = 0;
-        while let Some(i) = bytes[from..]
-            .iter()
-            .position(|&b| b == 0x1b)
-            .map(|i| from + i)
-        {
+        while let Some(i) = find_esc(&bytes[from..]).map(|i| from + i) {
             if bytes.get(i + 1) != Some(&b'c') {
                 from = i + 1;
                 continue;
@@ -441,20 +647,18 @@ impl VtCore {
             from = 0;
         }
         self.term.vt_write(bytes);
-        self.trailing_esc = bytes.last() == Some(&0x1b);
-        self.osc.feed(bytes);
-        if let Some(search) = &mut self.search {
-            search.stale = true;
+        if !bytes.is_empty() {
+            self.trailing_esc = bytes.last() == Some(&0x1b);
         }
     }
 
-    /// Search the screen and history for `query` (smart case: it only
-    /// matches case when it has capitals), showing the match nearest the
-    /// viewport's bottom. Empty ends the search.
-    pub fn search(&mut self, query: &str) -> Result<(), Error> {
+    /// Search the screen and history for `query`, text or a `regex`
+    /// (smart case: it only matches case when it has capitals), showing the
+    /// match nearest the viewport's bottom. Empty ends the search.
+    pub fn search(&mut self, query: &str, regex: bool) -> Result<(), Error> {
         self.search = None;
         if !query.is_empty() {
-            let search = Search::new(&self.term, query)?;
+            let search = Search::new(&self.term, query, regex)?;
             search.reveal(&mut self.term)?;
             self.search = Some(search);
         }
@@ -488,13 +692,20 @@ impl VtCore {
             let report = self.term.pwd()?;
             (
                 cwd_from_report(report, cfg!(windows)),
-                Some(Location::from_report(report)),
+                Some(location_from_report(report)),
             )
         } else {
             (None, None)
         };
+        let mut pty_reply = pending.pty_reply;
+        pty_reply.append(&mut self.osc.reply);
+        let context = std::mem::take(&mut self.osc.context_changed)
+            .then(|| self.osc.active_context().cloned());
         Ok(Effects {
-            pty_reply: pending.pty_reply,
+            pty_reply,
+            pointer: self.osc.pointer.take(),
+            context,
+            prompt_ready: std::mem::take(&mut self.prompt_ready),
             title,
             cwd,
             location,
@@ -505,6 +716,98 @@ impl VtCore {
             finished: std::mem::take(&mut self.osc.finished),
             clipboard: pending.clipboard,
         })
+    }
+
+    /// Copy mode: a cursor walking the screen and history with vi keys,
+    /// `v`/`V`/Ctrl+V selecting, `y` or Enter copying, Esc or `q` leaving.
+    /// Toggles.
+    pub fn copy_mode(&mut self) -> Result<(), Error> {
+        if self.copy_mode.is_some() {
+            self.leave_copy_mode()
+        } else {
+            self.enter_copy_mode()
+        }
+    }
+
+    /// Copy mode, unless it's on already.
+    pub fn enter_copy_mode(&mut self) -> Result<(), Error> {
+        self.quick_select = None;
+        if self.copy_mode.is_none() {
+            self.copy_mode = Some(CopyMode::enter(self)?);
+        }
+        self.redraw = true;
+        Ok(())
+    }
+
+    pub fn in_copy_mode(&self) -> bool {
+        self.copy_mode.is_some()
+    }
+
+    pub(crate) fn copy_state(&self) -> Option<&CopyMode> {
+        self.copy_mode.as_ref()
+    }
+
+    fn leave_copy_mode(&mut self) -> Result<(), Error> {
+        if self.copy_mode.take().is_some() {
+            CopyMode::leave(self)?;
+        }
+        self.redraw = true;
+        Ok(())
+    }
+
+    /// Drive copy mode; it leaves on [`CopyOutcome::Exit`] and
+    /// [`CopyOutcome::Yank`], and outside it every action exits.
+    pub fn copy_action(&mut self, action: CopyAction) -> Result<CopyOutcome, Error> {
+        let Some(mut copy) = self.copy_mode.take() else {
+            return Ok(CopyOutcome::Exit);
+        };
+        self.redraw = true;
+        let spans = self.blocks.spans(self);
+        let outcome = copy.apply(self, action, &spans);
+        if matches!(outcome, Ok(CopyOutcome::Exit | CopyOutcome::Yank(_))) {
+            CopyMode::leave(self)?;
+        } else {
+            self.copy_mode = Some(copy);
+        }
+        outcome
+    }
+
+    /// Quick select: label the URLs, paths, hashes and addresses in view;
+    /// typing a label copies it (Shift also types it in). Toggles.
+    pub fn quick_select(&mut self) -> Result<(), Error> {
+        self.leave_copy_mode()?;
+        self.quick_select = match self.quick_select.take() {
+            Some(_) => None,
+            None => Some(QuickSelect::new()),
+        };
+        self.redraw = true;
+        Ok(())
+    }
+
+    /// While copy mode or quick select is on, a key drives it instead of
+    /// going to the program. `None` when neither is on.
+    pub fn mode_key(&mut self, input: &KeyInput) -> Result<Option<Grabbed>, Error> {
+        if self.copy_mode.is_some() {
+            if input.action == key::Action::Release {
+                return Ok(Some(Grabbed::Nothing));
+            }
+            let Some(action) = copy::key_action(input) else {
+                return Ok(Some(Grabbed::Nothing));
+            };
+            return Ok(Some(match self.copy_action(action)? {
+                CopyOutcome::Yank(text) => Grabbed::Copy(text),
+                CopyOutcome::Stay | CopyOutcome::Exit | CopyOutcome::Message(_) => Grabbed::Nothing,
+            }));
+        }
+        if let Some(quick) = &mut self.quick_select {
+            self.redraw = true;
+            let grabbed = quick.key(input);
+            if grabbed.is_some() {
+                self.quick_select = None;
+            }
+            return Ok(Some(grabbed.unwrap_or(Grabbed::Nothing)));
+        }
+        Ok(None)
     }
 
     /// Bytes to send to the PTY for a key event; empty if it encodes to
@@ -535,6 +838,9 @@ impl VtCore {
     /// paste can't fake the end marker), otherwise with newlines sent as
     /// Enter like typing would.
     pub fn encode_paste(&mut self, text: &str) -> Result<Vec<u8>, Error> {
+        if self.copy_mode.take().is_some() || self.quick_select.take().is_some() {
+            self.redraw = true;
+        }
         self.term.scroll_viewport(ScrollViewport::Bottom);
         self.term.set_selection(None)?;
         let text = text.replace("\r\n", "\r").replace('\n', "\r");
@@ -750,7 +1056,7 @@ impl VtCore {
     }
 
     /// The selection as copied, leaving it in place.
-    fn selection_text(&self) -> Result<Option<String>, Error> {
+    pub fn selection_text(&self) -> Result<Option<String>, Error> {
         let options = selection::FormatOptions::new()
             .with_emit_format(Format::Plain)
             .with_unwrap(true)
@@ -873,6 +1179,7 @@ impl VtCore {
     /// A snapshot of the viewport if anything changed since the last call.
     /// Rows that didn't change are shared with the previous snapshot.
     pub fn snapshot(&mut self) -> Result<Option<Snapshot>, Error> {
+        let copy_cursor = self.copy_mode.as_ref().map(|c| c.viewport_cursor(self));
         let Self {
             term,
             render,
@@ -886,6 +1193,8 @@ impl VtCore {
             search,
             rows_out,
             rows_free,
+            quick_select,
+            redraw,
             ..
         } = self;
         let images = pictures.placements(term, *cell_size)?;
@@ -898,6 +1207,7 @@ impl VtCore {
             }
             None => None,
         };
+        let bracketed = term.mode(Mode::BRACKETED_PASTE)?;
         let state = render.update(term)?;
         let dirty = state.dirty()?;
         let (cols, row_count) = (state.cols()?, state.rows()?);
@@ -928,6 +1238,16 @@ impl VtCore {
             }),
             _ => None,
         };
+        // Copy mode shows its own cursor instead.
+        let cursor = match copy_cursor {
+            Some(at) => at.map(|(x, y)| Cursor {
+                x,
+                y,
+                shape: CursorShape::Block,
+                blinking: false,
+            }),
+            None => cursor,
+        };
         // Dirty tracking covers rows only: hiding, showing or moving the
         // cursor alone leaves the state clean.
         if dirty == Dirty::Clean
@@ -935,9 +1255,13 @@ impl VtCore {
             && colors == grid.colors
             && images == grid.images
             && found == grid.search
+            && bracketed == grid.bracketed_paste
+            && !*redraw
         {
             return Ok(None);
         }
+        *redraw = false;
+        grid.bracketed_paste = bracketed;
         grid.colors = colors;
         grid.cursor = cursor;
         grid.images = images;
@@ -1056,7 +1380,11 @@ impl VtCore {
         }
         state.set_dirty(Dirty::Clean)?;
 
-        Ok(Some(grid.clone()))
+        let mut snapshot = grid.clone();
+        if let Some(quick) = quick_select {
+            quick.label(&mut snapshot.lines, &colors);
+        }
+        Ok(Some(snapshot))
     }
 }
 
@@ -1081,7 +1409,10 @@ fn reclaim(out: &mut Vec<Arc<Line>>, free: &mut Vec<Arc<Line>>, rows: usize) {
 
 /// The OSC 8 URI of the cell at `at`, growing `buf` to fit; `None` for
 /// none or one that isn't UTF-8.
-fn hyperlink_uri<'b>(at: &GridRef<'_>, buf: &'b mut Vec<u8>) -> Result<Option<&'b str>, Error> {
+pub(crate) fn hyperlink_uri<'b>(
+    at: &GridRef<'_>,
+    buf: &'b mut Vec<u8>,
+) -> Result<Option<&'b str>, Error> {
     let len = match at.hyperlink_uri(buf) {
         Err(libghostty_vt::Error::OutOfSpace { required }) if required > buf.len() => {
             buf.resize(required, 0);
@@ -1205,6 +1536,7 @@ fn cell_ref<'t>(
 mod tests {
     use std::sync::Arc;
 
+    use crate::grab::Grabbed;
     use crate::snapshot::{CellFlags, Rgb, Width};
     use crate::vt::{KeyInput, VtCore};
     use libghostty_vt::key::{Action, Key, Mods};
@@ -1663,6 +1995,133 @@ mod tests {
         Ok(())
     }
 
+    /// Type `keys` into a mode: letters as themselves, with Ctrl for `^x`.
+    fn mode_keys(
+        vt: &mut VtCore,
+        keys: &str,
+    ) -> Result<Option<Grabbed>, Box<dyn std::error::Error>> {
+        let mut last = None;
+        let mut ctrl = false;
+        for c in keys.chars() {
+            if c == '^' {
+                ctrl = true;
+                continue;
+            }
+            let mods = if ctrl { Mods::CTRL } else { Mods::empty() };
+            let key = if c == '\n' {
+                Key::Enter
+            } else {
+                Key::Unidentified
+            };
+            let text = c.to_string();
+            last = vt.mode_key(&press(key, mods, Some(&text)))?;
+            ctrl = false;
+        }
+        Ok(last)
+    }
+
+    #[test]
+    fn input_survives_the_wire() {
+        let key = press(Key::A, Mods::CTRL | Mods::SHIFT, Some("A"));
+        assert_eq!(KeyInput::from_wire(&key.to_wire()), key);
+        let mouse = MouseInput {
+            action: MouseAction::Press(MouseButton::Right),
+            x: 25.0,
+            y: 40.0,
+            mods: Mods::ALT,
+        };
+        let wire = mouse.to_wire(3, (10, 20));
+        assert_eq!((wire.pane, wire.x, wire.y), (3, 2.5, 2.0), "in cells");
+        assert_eq!(MouseInput::from_wire(&wire, (10, 20)), mouse);
+    }
+
+    #[test]
+    fn copy_mode_walks_selects_and_copies() -> Result<(), Box<dyn std::error::Error>> {
+        let mut vt = VtCore::new(30, 4, 100)?;
+        for i in 0..10 {
+            vt.write(format!("row {i} alpha beta\r\n").as_bytes());
+        }
+        vt.write(b"$ ");
+        vt.copy_mode()?;
+        let snap = vt.snapshot()?.ok_or("copy mode redraws")?;
+        let cursor = snap.cursor.ok_or("copy cursor")?;
+        assert_eq!((cursor.x, cursor.y, cursor.blinking), (2, 3, false));
+        // Up two rows, to the start, a word on, select to the next word's end.
+        assert_eq!(mode_keys(&mut vt, "kk0wve")?, Some(Grabbed::Nothing));
+        assert_eq!(
+            mode_keys(&mut vt, "y")?,
+            Some(Grabbed::Copy("8 alpha".into()))
+        );
+        assert_eq!(
+            vt.mode_key(&press(Key::Unidentified, Mods::empty(), Some("j")))?,
+            None
+        );
+
+        // Lines, from history above the view: scrolls up to follow.
+        vt.copy_mode()?;
+        assert_eq!(
+            mode_keys(&mut vt, "gVj\n")?,
+            Some(Grabbed::Copy("row 0 alpha beta\nrow 1 alpha beta".into()))
+        );
+
+        // Esc drops the selection, then leaves without copying.
+        vt.copy_mode()?;
+        assert_eq!(mode_keys(&mut vt, "v")?, Some(Grabbed::Nothing));
+        let esc = press(Key::Escape, Mods::empty(), None);
+        assert_eq!(vt.mode_key(&esc)?, Some(Grabbed::Nothing));
+        assert!(vt.in_copy_mode());
+        assert_eq!(vt.mode_key(&esc)?, Some(Grabbed::Nothing));
+        assert_eq!(vt.mode_key(&esc)?, None);
+
+        // `o` swaps the selection's ends; `y` without one takes the line.
+        vt.copy_mode()?;
+        // "row 9", then the start moves in instead of the end out.
+        assert_eq!(
+            mode_keys(&mut vt, "k0vwoly")?,
+            Some(Grabbed::Copy("ow 9".into()))
+        );
+        vt.copy_mode()?;
+        assert_eq!(
+            mode_keys(&mut vt, "ky")?,
+            Some(Grabbed::Copy("row 9 alpha beta".into()))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn quick_select_labels_and_picks() -> Result<(), Box<dyn std::error::Error>> {
+        let mut vt = VtCore::new(40, 3, 100)?;
+        vt.write(b"see https://jet.dev/x and\r\nsrc/lib.rs:4 then");
+        vt.snapshot()?;
+        vt.quick_select()?;
+        let snap = vt.snapshot()?.ok_or("labels redraw")?;
+        let row = |snap: &crate::Snapshot, y: usize| snap.lines.get(y).map(|l| l.text());
+        assert_eq!(row(&snap, 0).as_deref(), Some("see attps://jet.dev/x and"));
+        assert_eq!(row(&snap, 1).as_deref(), Some("src/lib.rs:4 then"));
+        assert_eq!(
+            mode_keys(&mut vt, "S")?,
+            Some(Grabbed::CopyAndPaste("src/lib.rs:4".into()))
+        );
+        let snap = vt.snapshot()?.ok_or("labels go")?;
+        assert_eq!(row(&snap, 0).as_deref(), Some("see https://jet.dev/x and"));
+        Ok(())
+    }
+
+    #[test]
+    fn scrollback_keeps_the_configured_lines() -> Result<(), Box<dyn std::error::Error>> {
+        for cols in [80, 300] {
+            let mut vt = VtCore::new(cols, 24, 10_000)?;
+            let text: String = (0..30_000).map(|i| format!("line {i}\r\n")).collect();
+            vt.write(text.as_bytes());
+            let history = vt.term.scrollbar()?.total - 24;
+            assert!(
+                (10_000..12_000).contains(&history),
+                "{cols} cols kept {history}"
+            );
+        }
+        Ok(())
+    }
+
     #[test]
     fn search_finds_history_and_steps_to_it() -> Result<(), Box<dyn std::error::Error>> {
         let mut vt = VtCore::new(20, 4, 1000)?;
@@ -1687,7 +2146,7 @@ mod tests {
                 .collect();
             Ok((search.total, search.current, rows))
         };
-        vt.search("needle")?;
+        vt.search("needle", false)?;
         let (total, current, rows) = shown(&mut vt)?;
         assert_eq!((total, current), (4, Some(3)), "starts at the newest");
         assert_eq!(rows, vec![("XY needle".to_owned(), 3..9, true)]);
@@ -1698,9 +2157,9 @@ mod tests {
         vt.search_step(2)?;
         assert_eq!(shown(&mut vt)?.1, Some(0), "wraps around");
         // Capitals match case.
-        vt.search("Needle")?;
+        vt.search("Needle", false)?;
         assert_eq!(shown(&mut vt)?.0, 3);
-        vt.search("")?;
+        vt.search("", false)?;
         let snap = vt.snapshot()?.ok_or("ending the search redraws")?;
         assert_eq!(snap.search, None);
         Ok(())
@@ -1762,6 +2221,15 @@ mod tests {
         })?;
         vt.write(b"\x1b[?996n");
         assert_eq!(vt.take_effects()?.pty_reply, b"\x1b[?997;2n", "light");
+        // Mode 2031: flipping back to dark is reported unasked.
+        vt.write(b"\x1b[?2031h");
+        vt.configure(&VtSettings::default())?;
+        assert_eq!(vt.take_effects()?.pty_reply, b"\x1b[?997;1n", "2031");
+        vt.configure(&VtSettings::default())?;
+        assert!(
+            vt.take_effects()?.pty_reply.is_empty(),
+            "no flip, no report"
+        );
         Ok(())
     }
 

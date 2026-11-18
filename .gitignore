@@ -13,3 +13,11 @@ target/
 
 # written by `notices`; the dist_* scripts generate their own
 /THIRD-PARTY-NOTICES
+
+# jetmux-web UI (built by jetmux_web_build)
+crates/jetmux-web/web/node_modules/
+crates/jetmux-web/web/dist/
+
+.cursor
+.claude
+.codex
