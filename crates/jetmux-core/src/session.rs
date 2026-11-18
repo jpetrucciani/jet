@@ -1320,14 +1320,17 @@ mod tests {
         use jetmux_proto::pane::{PaneEvent, Progress};
         let mut s = session();
         let pane = s.pane_mut(0).unwrap();
-        // Without OSC 7, where procfs says, once per move.
-        let polled = pane.poll_location();
-        assert!(
-            matches!(&polled, Some(PaneEvent::Location(Some(l))) if l.host.is_some() && l.path.starts_with('/')),
-            "{polled:?}"
-        );
-        assert_eq!(pane.poll_location(), None);
-        assert!(pane.state_reports().contains(&polled.unwrap()));
+        // Without OSC 7, where procfs says, once per move. Linux only: with
+        // no procfs, only the shell's own report counts.
+        if cfg!(target_os = "linux") {
+            let polled = pane.poll_location();
+            assert!(
+                matches!(&polled, Some(PaneEvent::Location(Some(l))) if l.host.is_some() && l.path.starts_with('/')),
+                "{polled:?}"
+            );
+            assert_eq!(pane.poll_location(), None);
+            assert!(pane.state_reports().contains(&polled.unwrap()));
+        }
         pane.feed(b"\x1b]7;file://box/tmp\x07\x1b]9;4;1;42\x07\x1b]1337;SetUserVar=k=dg==\x07")
             .unwrap();
         let location = PaneEvent::Location(Some(jet_core::Location {
