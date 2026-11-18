@@ -763,8 +763,11 @@ let
       name = "jetmux_ts";
       description = "regenerate the web UI's TypeScript types from the Rust ones";
       script = ''
-        TS_RS_EXPORT_DIR="$PWD/crates/jetmux-web/web/src/proto" \
-          cargo test -p jetmux-web --features ts export_bindings
+        set -euo pipefail
+        proto="$PWD/crates/jetmux-web/web/src/proto"
+        TS_RS_EXPORT_DIR="$proto" cargo test -p jetmux-web --features ts export_bindings
+        # As the repo's formatter leaves them, so a jfmt run changes nothing.
+        ${jfmt}/bin/jfmt --quiet "$proto"
       '';
     };
     jetmux_web_build = pog {

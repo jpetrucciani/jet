@@ -1,0 +1,2 @@
+# Byte streams replayed as they are: CR and LF both matter.
+corpus/*.vt binary
