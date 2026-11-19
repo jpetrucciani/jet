@@ -28,6 +28,7 @@ commands:
   close [--pane N | --tab T]
   set-title [--tab T | --pane N] [TITLE]   no TITLE unpins
   set-icon [--tab T | --pane N] [ICON]     text, an .svg path, or <svg...>
+  set-color [--tab T | --pane N] [COLOR]   #rrggbb; no COLOR: the config's
   set-var [--pane N] NAME [VALUE]          no VALUE unsets
   resize [--pane N] --ratio R  the pane's share of its split
   reload-config
@@ -323,6 +324,10 @@ fn parse(
             value: one(&mut words)?,
         }),
         "set-icon" => Request::SetIcon(SetLabel {
+            target,
+            value: one(&mut words)?,
+        }),
+        "set-color" => Request::SetColor(SetLabel {
             target,
             value: one(&mut words)?,
         }),

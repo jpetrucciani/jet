@@ -37,6 +37,10 @@ features = []                 # OpenType features over the defaults:
                               # beside this config or Ghostty's, which wins
                               # over a built-in one of that name. [colors]
                               # below override it.
+# light = "Nu Disco Light"    # in place of name while the system is in
+# dark = "Nu Disco Dark"      # light or dark mode, switching when it does
+                              # (Windows and macOS; Linux counts as dark).
+                              # Choose theme writes the one in effect
 
 [colors]
 # foreground = "#a6accd"      # unset: jet's defaults, or the theme's
@@ -86,6 +90,10 @@ width = 24                    # cells, when left or right
 # foreground = "#a6accd"
 # active-background = "#303340"
 # active-foreground = "#ffffff"
+color-style = "fill"          # how a profile's tab-color shows: fill (the
+                              # tab, dimmer when inactive) | top | bottom |
+                              # left | right (a line on that edge) | dot
+                              # (before the title) | text (the title)
 
 [shell]
 # command = "pwsh -NoLogo"    # a line (double quotes group; backslashes are
@@ -119,6 +127,12 @@ integration = true            # bash (4+), zsh and PowerShell started in jet
 #
 # [profiles.voyager]               # straight into a box, no shell in between
 # command = "ssh voyager"
+# theme = "Red Alert"              # its panes' theme, like [theme] name; the
+#                                  # title and tab bars follow while focused
+# colors.background = "#2a0000"    # its panes' colors, over theme's, then
+#                                  # [colors]: every [colors] key works
+# tab-color = "#cc3333"            # its tabs, per [tab-bar] color-style
+# color-style = "fill"             # or its own, over [tab-bar]'s
 #
 # [profiles.dev]                   # a jetmux session: its tabs and splits show
 # jetmux = { host = "voyager", session = "main", up = "dev" }
@@ -130,6 +144,16 @@ integration = true            # bash (4+), zsh and PowerShell started in jet
 #                                  # over ssh), unset: PATH. icon: as above,
 #                                  # unset: a split-pane mark. Opening it again
 #                                  # adds a tab to the session
+
+# Looks by host, over the pane's profile's: for panes whose {host} (as the
+# status shows it: where the shell says it is, else the ssh in front, else
+# this computer) matches a rule's regex. The first match by name wins.
+# theme, colors, tab-color and color-style work as in a profile. A host
+# reached by ssh shows once the pane has been in front.
+# [hosts.prod]
+# match = '^prod-'
+# tab-color = "#cc3333"
+# theme = "Red Alert"
 
 [terminal]
 scrollback = 10000            # lines of history
@@ -151,7 +175,6 @@ bell = ["flash", "attention"] # flash: the window, when it's in front;
 style = "block"               # block | bar | underline
 blink = true
 
-# Segments about the focused pane. None by default.
 # Plumbing, after Plan 9's plumber: Ctrl+click text a rule's regex matches
 # (it's underlined while hovered) and the rule acts on it. Where several
 # match, the longest match wins. Rules are named so an include can replace
@@ -186,6 +209,8 @@ blink = true
 # view = ["git", "show", "{0}"]
 # in = "down"
 
+# Segments about the focused pane, in the title bar, tab bar or a row of
+# their own. None by default.
 [status]
 position = "titlebar"         # titlebar: beside the window buttons, with
                               #   decorations = "custom" (else bottom)
@@ -193,11 +218,25 @@ position = "titlebar"         # titlebar: beside the window buttons, with
                               # top | bottom: a row of their own
 style = "powerline"           # powerline | round | plain
 
-# A segment hides while any {field} in it is empty. Fields: {title} {cwd}
-# {dir} {host} {user} {ssh} {process} {profile} {tab} {tabs} {time} {date}
-# {progress} {exit} (the last command's status when it failed, from shells
-# that send OSC 133) and {var.NAME} (set with OSC 1337 SetUserVar). {{ and }} are
-# literal braces. More in docs/status.md.
+# A segment hides while any {field} in it is empty. Fields:
+#   {title}             what the shell set as the title
+#   {cwd} {dir}         where the shell is (OSC 7, remote paths too), and
+#                       just its last part
+#   {host} {user}       where and as whom the innermost context runs: sudo,
+#                       a container or ssh (OSC 3008, OSC 7), else this
+#                       computer and you
+#   {ssh}               user@host of an ssh in front; empty otherwise
+#   {context}           what the innermost OSC 3008 context changed: the
+#                       sudo user, the container, VM or remote host
+#   {process}           the program in front
+#   {profile}           the pane's profile, "default" for the shell
+#   {tab} {tabs}        the tab's number, and how many there are
+#   {time} {date}       local HH:MM and YYYY-MM-DD
+#   {progress}          42% while a program reports progress (OSC 9;4)
+#   {exit}              the last command's status when it failed (shells
+#                       that send OSC 133)
+#   {var.NAME}          a user variable, set with OSC 1337 SetUserVar
+# {{ and }} are literal braces. More in docs/status.md.
 #
 # [[status.segments]]
 # text = "{user}@{host}"
@@ -230,12 +269,15 @@ height = 0.45
 hide-on-blur = true           # hide when another window takes the focus
 always-on-top = true
 taskbar = false               # show in the taskbar and Alt+Tab (macOS: the
-                              # Dock, read at start; ignored on Linux)
+                              # Dock, read at start, and clicking it toggles;
+                              # ignored on Linux)
 over-taskbar = false          # Windows only: x, y, width and height are of
                               # the whole monitor, so it can cover the taskbar
-autostart = true              # Windows only: keep `jet quake` running,
-                              # started at sign-in and by any jet window
-                              # that finds it isn't (hidden until the hotkey)
+autostart = true              # Windows and macOS: keep `jet quake` running,
+                              # started at sign-in (macOS: a launchd agent,
+                              # ~/Library/LaunchAgents/dev.jet.quake.plist)
+                              # and by any jet window that finds it isn't
+                              # (hidden until the hotkey)
 
 # Ghostty's chord and action names, so `keybind = ...` lines carry over.
 # Modifiers: ctrl, shift, alt (opt), super (cmd, win). Keys: a-z, 0-9,
@@ -255,15 +297,18 @@ autostart = true              # Windows only: keep `jet quake` running,
 # toggle_split_zoom, resize_split:left|right|up|down[:PERCENT] (moves the
 # nearest divider that way, 5% of its split by default), equalize_splits,
 # rename_tab (an empty name gives the tab back its shell title),
+# set_tab_color (a palette of colors for the tab, over its profile's and
+# host's; also set_tab_color:#rrggbb, and set_tab_color:none to go back),
 # move_tab:N (negative is left; unbound by default, like rename_tab),
 # reload_config, ignore (swallow the key), unbind (give it back to the
 # program), copy_version (jet's version, also in the palette as About),
 # open_config (in your editor; a new file starts as this one, commented
 # out), choose_theme (a palette of the themes found, previewed as you move;
 # Enter writes it to the config), new_tab_menu (the profiles, as on a right
-# click of the tab bar),
-# detach (take the focused jetmux session's tabs out of jet,
-# still running there; closing a jetmux tab or split closes it there too),
+# click of the tab bar), reset_quake (the quake window back to its [quake]
+# place after dragging it by the tab bar or sizing it from an edge),
+# detach (take the focused jetmux session's tabs out of jet, still running
+# there; closing a jetmux tab or split closes it there too),
 # text:TEXT (send it as if typed; \r \n \t \e \xHH \u{HHHH}
 # escapes, so "ctrl+enter" = 'text:\r' makes Ctrl+Enter a plain Enter).
 #
@@ -338,7 +383,8 @@ autostart = true              # Windows only: keep `jet quake` running,
 # keys here, which win over the imported file. Supported: font-family,
 # font-size, font-feature, theme, palette, background, foreground,
 # cursor-color, selection-background/foreground, background-opacity,
-# window-padding-x/y, command, keybind, cursor-style, cursor-style-blink,
+# window-padding-x/y, command, keybind (`keybind = clear` is [keybinds]
+# defaults = false), cursor-style, cursor-style-blink,
 # copy-on-select, clipboard-write, desktop-notifications,
 # clipboard-paste-protection, confirm-close-surface, unfocused-split-opacity.
 # Others log a warning and are ignored.

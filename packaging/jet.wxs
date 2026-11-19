@@ -2,7 +2,7 @@
 <!--
   jet's Windows installer, built by dist_win with msitools' wixl. Per-user:
   no admin, installed to %LOCALAPPDATA%\Programs\jet, on the user's PATH,
-  with a Start Menu shortcut. A newer version replaces an older one (the
+  with a Start Menu shortcut and "Open jet here" in Explorer. A newer version replaces an older one (the
   UpgradeCode never changes). Config in %APPDATA%\jet is left alone.
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
@@ -34,6 +34,24 @@
                            Part="last" System="no" Permanent="no"/>
               <RemoveFolder Id="RemoveInstallDir" On="uninstall"/>
             </Component>
+            <!-- "Open jet here" on Explorer's right click, of a folder and of
+                 the space inside one (Windows 11: under Show more options).
+                 "%V\." as a bare "C:\" would end in an escaped quote. -->
+            <Component Id="ExplorerMenu" Guid="F0C31EAE-79EC-4CB8-9D6C-DF156E2311BE">
+              <RegistryValue Root="HKCU" Key="Software\Classes\Directory\shell\jet"
+                             Type="string" Value="Open jet here" KeyPath="yes"/>
+              <RegistryValue Root="HKCU" Key="Software\Classes\Directory\shell\jet"
+                             Name="Icon" Type="string" Value="[INSTALLDIR]jet.exe"/>
+              <RegistryValue Root="HKCU" Key="Software\Classes\Directory\shell\jet\command"
+                             Type="string" Value="&quot;[INSTALLDIR]jet.exe&quot; &quot;%V\.&quot;"/>
+              <RegistryValue Root="HKCU" Key="Software\Classes\Directory\Background\shell\jet"
+                             Type="string" Value="Open jet here"/>
+              <RegistryValue Root="HKCU" Key="Software\Classes\Directory\Background\shell\jet"
+                             Name="Icon" Type="string" Value="[INSTALLDIR]jet.exe"/>
+              <RegistryValue Root="HKCU"
+                             Key="Software\Classes\Directory\Background\shell\jet\command"
+                             Type="string" Value="&quot;[INSTALLDIR]jet.exe&quot; &quot;%V\.&quot;"/>
+            </Component>
           </Directory>
         </Directory>
       </Directory>
@@ -49,16 +67,21 @@
 
     <!-- On removal (uninstall, or an upgrade replacing this version): drop
          quake's sign-in entry and quit it, so nothing points at or holds
-         the files. A jet window run after an upgrade adds the entry back. -->
+         the files. Once installed (an upgrade too): the new jet puts the
+         entry back and starts quake, unless quake.autostart is off. -->
     <CustomAction Id="QuakeUninstall" FileKey="jet.exe" ExeCommand="quake --uninstall"
                   Execute="immediate" Return="ignore"/>
+    <CustomAction Id="QuakeAutostart" FileKey="jet.exe" ExeCommand="quake --autostart"
+                  Execute="immediate" Return="asyncNoWait"/>
     <InstallExecuteSequence>
       <Custom Action="QuakeUninstall" Before="InstallInitialize">REMOVE="ALL"</Custom>
+      <Custom Action="QuakeAutostart" After="InstallFinalize">NOT REMOVE="ALL"</Custom>
     </InstallExecuteSequence>
 
     <Feature Id="jet" Level="1">
       <ComponentRef Id="Files"/>
       <ComponentRef Id="StartMenu"/>
+      <ComponentRef Id="ExplorerMenu"/>
     </Feature>
   </Product>
 </Wix>

@@ -11,8 +11,8 @@ use winit::dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize, P
 use winit::monitor::MonitorHandle;
 use winit::window::{Window, WindowLevel};
 
-/// Ask a running `jet quake` to toggle. False if none is running.
-pub fn signal_running() -> bool {
+/// Whether a `jet quake` is running, asking it to toggle with `toggle`.
+pub fn signal_running(toggle: bool) -> bool {
     let Ok(running) = transport::running() else {
         return false;
     };
@@ -24,17 +24,20 @@ pub fn signal_running() -> bool {
             client.call(Request::Hello).map(|r| r.body),
             Ok(Body::Ok(Answer::Hello(hello))) if hello.quake
         );
-        is_quake && client.call(Request::ToggleQuake).is_ok()
+        is_quake && (!toggle || client.call(Request::ToggleQuake).is_ok())
     })
 }
 
-/// Place per `quake` on its monitor and bring to the front, focused.
-pub fn show(window: &Window, quake: &Quake) {
-    let monitor = match quake.monitor {
-        Monitor::Cursor => under_cursor(window),
-        Monitor::Primary => window.primary_monitor(),
-    };
-    place(window, quake, monitor);
+/// Place per `quake` on its monitor (or with `!replace`, leave it where
+/// it was) and bring to the front, focused.
+pub fn show(window: &Window, quake: &Quake, replace: bool) {
+    if replace {
+        let monitor = match quake.monitor {
+            Monitor::Cursor => under_cursor(window),
+            Monitor::Primary => window.primary_monitor(),
+        };
+        place(window, quake, monitor);
+    }
     window.set_window_level(if quake.always_on_top {
         WindowLevel::AlwaysOnTop
     } else {
@@ -213,6 +216,19 @@ pub mod mac {
         fn UnregisterEventHotKey(hotkey: Id) -> OsStatus;
     }
 
+    type AeHandler = unsafe extern "C" fn(*const c_void, *mut c_void, *mut c_void) -> i16;
+
+    #[link(name = "CoreServices", kind = "framework")]
+    unsafe extern "C" {
+        fn AEInstallEventHandler(
+            class: u32,
+            id: u32,
+            handler: AeHandler,
+            refcon: *mut c_void,
+            is_system: u8,
+        ) -> i16;
+    }
+
     /// `[receiver selector]`, for a method taking nothing and returning `R`.
     /// arm64 returns structs like CGRect in registers; x86_64 would need
     /// `objc_msgSend_stret` for them.
@@ -291,6 +307,88 @@ pub mod mac {
         if !app.is_null() {
             unsafe { send_with(app, c"hide:", null_mut::<c_void>()) };
         }
+    }
+
+    /// Have clicks on the Dock icon (the "reopen" Apple Event, which winit
+    /// doesn't pass on) call `wake`, for the rest of the process. Replaces
+    /// AppKit's handler, so call once the app has finished launching.
+    pub fn on_dock_click(wake: Wake) {
+        const CORE: u32 = u32::from_be_bytes(*b"aevt");
+        const REOPEN: u32 = u32::from_be_bytes(*b"rapp");
+        // Kept for as long as the handler is installed: the process.
+        let wake = Box::into_raw(Box::new(wake));
+        let status = unsafe { AEInstallEventHandler(CORE, REOPEN, reopened, wake.cast(), 0) };
+        if status != 0 {
+            drop(unsafe { Box::from_raw(wake) });
+            eprintln!("jet: listening for Dock clicks failed ({status})");
+        }
+    }
+
+    unsafe extern "C" fn reopened(_: *const c_void, _: *mut c_void, wake: *mut c_void) -> i16 {
+        // SAFETY: the `Wake` on_dock_click boxed and never frees.
+        let wake = unsafe { &*wake.cast::<Wake>() };
+        wake();
+        0
+    }
+
+    /// `quake.autostart`: have launchd run `jet quake --background` (this
+    /// jet) at login, and start it now if it isn't running; or neither.
+    pub fn autostart(on: bool) -> Result<(), String> {
+        let home = std::env::var_os("HOME").ok_or("quake.autostart: HOME isn't set")?;
+        let plist = std::path::Path::new(&home).join("Library/LaunchAgents/dev.jet.quake.plist");
+        if !on {
+            return match std::fs::remove_file(&plist) {
+                Err(err) if err.kind() != std::io::ErrorKind::NotFound => Err(format!(
+                    "quake.autostart: removing {}: {err}",
+                    plist.display()
+                )),
+                _ => Ok(()),
+            };
+        }
+        let exe = std::env::current_exe().map_err(|e| format!("quake.autostart: {e}"))?;
+        let exe = exe.to_string_lossy();
+        if !super::signal_running(false) {
+            crate::app::winit::run_detached(&exe, &["quake", crate::app::BACKGROUND]);
+        }
+        let escaped = exe
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;");
+        let text = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Written by jet for [quake] autostart; removed when that's false. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.jet.quake</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{escaped}</string>
+    <string>quake</string>
+    <string>{}</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+</dict>
+</plist>
+"#,
+            crate::app::BACKGROUND
+        );
+        // Rewritten only when it changes (another jet.app, say), as every
+        // window does this.
+        if std::fs::read_to_string(&plist).is_ok_and(|old| old == text) {
+            return Ok(());
+        }
+        let write = || {
+            if let Some(dir) = plist.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            std::fs::write(&plist, &text)
+        };
+        write().map_err(|err| format!("quake.autostart: writing {}: {err}", plist.display()))
     }
 
     /// A global hotkey through Carbon, which needs no Accessibility

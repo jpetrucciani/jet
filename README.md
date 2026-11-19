@@ -18,11 +18,14 @@ jet's own renderer, windowing and app shell.
   Kitty graphics protocol.
 - **GPU rendering** with wgpu (DirectX 12, Metal, Vulkan): ligatures, color
   emoji, fallback fonts. Ghostty's ~900 themes built in, previewed live from
-  the palette.
+  the palette, with a light and a dark one following the system.
 - **Tabs, splits and profiles** (named shells, or `ssh` straight into a
   box), with zoom, resize and a **command palette** for every action. Right
   click the tab bar for a profile menu; separate default profiles for new
-  windows, quake and new tabs.
+  windows, quake and new tabs. A profile can have its own theme and a tab
+  color (the whole tab, an edge line, a dot or the title), and so can a
+  host: ssh into `prod-*` and the pane turns red. Any tab can be colored
+  from the palette.
 - **Safe by default:** asks before closing a tab or window with something
   running, and before pasting lines a prompt would run (not into programs
   with bracketed paste).
@@ -41,9 +44,10 @@ jet's own renderer, windowing and app shell.
 - **Follow ssh:** a new tab from a pane running `ssh` (or `wsl.exe`) lands on
   the same host in the same directory.
 - **Quake window:** a global hotkey (`ctrl+space`, `ctrl+grave` on macOS)
-  drops a window from any edge or fraction of the screen. On Windows it
-  starts at sign-in by default, with its own profile, optionally over the
-  taskbar.
+  drops a window from any edge or fraction of the screen. Drag it by the
+  tab bar or size it from an edge and it comes back there for the session.
+  On Windows it starts at sign-in by default, with its own profile,
+  optionally over the taskbar.
 - **Session restore**, desktop **notifications** (OSC 9/777), taskbar
   **progress** (OSC 9;4), **clipboard writes** (OSC 52, never reads),
   hyperlinks (OSC 8).
@@ -85,13 +89,13 @@ A tmux-style daemon that owns the shells, so sessions outlive any client.
 
 ## Install
 
-|             |                                                                                                                                                                                                                                                                                                                     |
-| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Windows** | The `.msi` (per-user, no admin: Start Menu, PATH, upgrades in place), or Scoop: `scoop install https://github.com/jpetrucciani/jet/releases/latest/download/jet.json`, then `scoop update jet`. Or unzip anywhere, keeping `conpty.dll` and `OpenConsole.exe` beside `jet.exe` (a newer ConPTY than Windows ships). |
-| **macOS**   | Move `jet.app` to Applications. Not notarized yet: allow it under Privacy & Security, or `xattr -dr com.apple.quarantine /Applications/jet.app`.                                                                                                                                                                    |
-| **Linux**   | Put `jet` and `jet-cli` on `PATH`. Needs Vulkan (or GL) and Wayland or X11, glibc 2.35+.                                                                                                                                                                                                                            |
-| **jetmux**  | Static binaries for any x86_64 Linux: untar onto `PATH` on each server.                                                                                                                                                                                                                                             |
-| **Nix**     | `import ./jet { }` gives `jetmux`, `jetmux-static` and `homeManagerModules.default` (`programs.jet`, `programs.jetmux`, with a systemd user service).                                                                                                                                                               |
+|             |                                                                                                                                                                                                                                                                                                                                                  |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Windows** | The `.msi` (per-user, no admin: Start Menu, PATH, "Open jet here" in Explorer, upgrades in place), or Scoop: `scoop install https://github.com/jpetrucciani/jet/releases/latest/download/jet.json`, then `scoop update jet`. Or unzip anywhere, keeping `conpty.dll` and `OpenConsole.exe` beside `jet.exe` (a newer ConPTY than Windows ships). |
+| **macOS**   | Move `jet.app` to Applications. Not notarized yet: allow it under Privacy & Security, or `xattr -dr com.apple.quarantine /Applications/jet.app`.                                                                                                                                                                                                 |
+| **Linux**   | Put `jet` and `jet-cli` on `PATH`. Needs Vulkan (or GL) and Wayland or X11, glibc 2.35+.                                                                                                                                                                                                                                                         |
+| **jetmux**  | Static binaries for any x86_64 Linux: untar onto `PATH` on each server.                                                                                                                                                                                                                                                                          |
+| **Nix**     | `import ./jet { }` gives `jetmux`, `jetmux-static` and `homeManagerModules.default` (`programs.jet`, `programs.jetmux`, with a systemd user service).                                                                                                                                                                                            |
 
 jet's x86_64 builds need AVX2 (x86-64-v3: Intel Haswell, AMD Zen or newer).
 jetmux's run on any x86_64.

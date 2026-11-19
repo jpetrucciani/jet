@@ -42,12 +42,13 @@ const EDGE_DIPS: f64 = 6.0;
 const BLINK: Duration = Duration::from_millis(600);
 
 /// A terminal window, or with `quake` the one that shows and hides (see
-/// [`quake`]).
-pub fn run(quake: bool, first: First) -> ExitCode {
-    if quake && quake::signal_running() {
+/// [`quake`]): toggling a running one instead, or with `background`,
+/// leaving it be, and otherwise starting hidden.
+pub fn run(quake: bool, background: bool, first: First) -> ExitCode {
+    if quake && quake::signal_running(!background) {
         return ExitCode::SUCCESS;
     }
-    match run_loop(quake, first) {
+    match run_loop(quake, background, first) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("jet: {err}");
@@ -56,7 +57,15 @@ pub fn run(quake: bool, first: First) -> ExitCode {
     }
 }
 
-fn run_loop(quake: bool, first: First) -> Result<(), BoxError> {
+/// The system's light or dark mode, where winit can tell (macOS).
+fn appearance(theme: Option<winit::window::Theme>) -> jet_config::Appearance {
+    match theme {
+        Some(winit::window::Theme::Light) => jet_config::Appearance::Light,
+        _ => jet_config::Appearance::Dark,
+    }
+}
+
+fn run_loop(quake: bool, background: bool, first: First) -> Result<(), BoxError> {
     let settings = ConfigFile::load();
     let start = Start::new(&settings.config, quake, first);
     let mut builder = EventLoop::<Wake>::with_user_event();
@@ -83,6 +92,7 @@ fn run_loop(quake: bool, first: First) -> Result<(), BoxError> {
         settings: Some(settings),
         start: Some(start),
         quake,
+        background,
         app: None,
         error: None,
     };
@@ -126,6 +136,9 @@ pub struct Winit {
     reframe: bool,
     /// This is `jet quake`'s window.
     quake: bool,
+    /// The user dragged or sized the quake window: it comes back where
+    /// they left it, this session, instead of per `[quake]`.
+    moved: bool,
     #[cfg(target_os = "macos")]
     hotkey: Option<quake::mac::Hotkey>,
 }
@@ -207,6 +220,7 @@ impl Host for Winit {
             WindowRequest::Close => self.closing = true,
             WindowRequest::Raise => self.window.focus_window(),
             WindowRequest::Move => {
+                self.moved |= self.quake;
                 if let Err(err) = self.window.drag_window() {
                     eprintln!("jet: moving the window: {err}");
                 }
@@ -229,8 +243,16 @@ impl Host for Winit {
         self.quake
     }
 
+    #[cfg(target_os = "macos")]
+    fn autostart(&mut self, on: bool) {
+        if let Err(err) = quake::mac::autostart(on) {
+            eprintln!("jet: {err}");
+        }
+    }
+
     fn reconfigure_quake(&mut self, config: &jet_config::Quake) -> Option<String> {
         let problem = self.register_hotkey(config);
+        self.moved = false;
         if self.window.is_visible().unwrap_or(false) {
             quake::place(&self.window, config, self.window.current_monitor());
         }
@@ -298,6 +320,8 @@ struct Handler {
     /// Readied before the loop for the window to take.
     start: Option<Start>,
     quake: bool,
+    /// `jet quake --background`: hidden until the hotkey.
+    background: bool,
     app: Option<App<Winit>>,
     /// Why the window couldn't open, for `run` to report.
     error: Option<BoxError>,
@@ -313,9 +337,14 @@ impl Handler {
         } else {
             settings.config.window.decorations
         };
+        // On macOS a transparent window's own title bar goes see-through
+        // too, so only when jet draws that bar or the window is to be.
+        let transparent = !cfg!(target_os = "macos")
+            || decorations != Decorations::System
+            || settings.config.window.opacity < 1.0;
         let attributes = WindowAttributes::default()
             .with_title(if quake { "jet quake" } else { "jet" })
-            .with_transparent(true)
+            .with_transparent(transparent)
             .with_visible(!quake)
             .with_decorations(system_frame(decorations));
         // jet's title bar under the system's buttons, set once: AppKit's
@@ -351,6 +380,7 @@ impl Handler {
             closing: false,
             reframe: false,
             quake,
+            moved: false,
             #[cfg(target_os = "macos")]
             hotkey: None,
         };
@@ -365,17 +395,27 @@ impl Handler {
             settings,
             self.start.take().unwrap_or_default(),
         )?;
+        app.set_appearance(appearance(event_loop.system_theme()));
         if quake {
             #[cfg(target_os = "macos")]
-            quake::mac::join_all_spaces(&window);
+            {
+                quake::mac::join_all_spaces(&window);
+                // With a Dock icon, clicking it toggles, as the hotkey.
+                quake::mac::on_dock_click(app.host.waker(Wake::Quake));
+            }
             let placed = app.settings.config.quake.clone();
             app.hotkey_problem = app.host.register_hotkey(&placed);
             app.refresh_banner();
-            // Shown at once, there being no tray icon to say it's running;
-            // from the loop, once macOS has finished launching the app.
-            (app.host.waker(Wake::Quake))();
+            // Shown at once, there being no tray icon to say it's running,
+            // unless started to wait for the hotkey; from the loop, once
+            // macOS has finished launching the app.
+            if !self.background {
+                (app.host.waker(Wake::Quake))();
+            }
             return Ok(app);
         }
+        let on = app.settings.config.quake.autostart;
+        app.host.autostart(on);
         let (w, h) = app.client_size_for(app.first_grid())?;
         let _ = window.request_inner_size(PhysicalSize::new(w as u32, h as u32));
         let size = window.inner_size();
@@ -454,6 +494,7 @@ impl ApplicationHandler<Wake> for Handler {
                 app.render();
             }
             WindowEvent::RedrawRequested => app.render(),
+            WindowEvent::ThemeChanged(theme) => app.set_appearance(appearance(Some(theme))),
             WindowEvent::Focused(focused) => {
                 // Alt+Tab mid-drag: the release goes elsewhere.
                 if !focused {
@@ -545,7 +586,11 @@ impl App<Winit> {
         if self.tabs.is_empty() {
             self.new_tab(None);
         }
-        quake::show(&self.host.window, &self.settings.config.quake);
+        quake::show(
+            &self.host.window,
+            &self.settings.config.quake,
+            !self.host.moved,
+        );
     }
 
     /// The input method's uncommitted text changed (empty when it's done).
@@ -671,6 +716,7 @@ impl App<Winit> {
         // edges resize, jet's buttons, and the title bar moves the window.
         if button == MouseButton::Left && self.buttons == 0 && self.drag.is_none() {
             if pressed && let Some(direction) = self.edge_at(x, y) {
+                self.host.moved |= self.host.quake;
                 if let Err(err) = self.host.window.drag_resize_window(direction) {
                     eprintln!("jet: resizing the window: {err}");
                 }
@@ -718,10 +764,9 @@ impl App<Winit> {
     /// macOS resizes every window from its edges itself.
     fn edge_at(&self, x: i32, y: i32) -> Option<ResizeDirection> {
         let window = &self.host.window;
-        if cfg!(target_os = "macos")
-            || self.decorations() == Decorations::System
-            || window.is_maximized()
-        {
+        // The quake window has no frame either, so sizes the same way.
+        let framed = self.decorations() == Decorations::System && !self.host.quake;
+        if cfg!(target_os = "macos") || framed || window.is_maximized() {
             return None;
         }
         let edge = (EDGE_DIPS * window.scale_factor()).round() as i32;

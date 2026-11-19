@@ -37,6 +37,7 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{
     GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
 };
+use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::HiDpi::{
@@ -60,7 +61,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow,
     DispatchMessageW, FLASHW_TIMERNOFG, FLASHW_TRAY, FLASHWINFO, FlashWindowEx, GWLP_USERDATA,
     GetCaretBlinkTime, GetCursorPos, GetForegroundWindow, GetMessageW, GetSystemMetrics,
-    GetWindowLongPtrW, HICON, HTCAPTION, HTCLIENT, HTCLOSE, HTMAXBUTTON, HTMINBUTTON, HTTOP,
+    GetWindowLongPtrW, GetWindowRect, HICON, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION,
+    HTCLIENT, HTCLOSE, HTLEFT, HTMAXBUTTON, HTMINBUTTON, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT,
     IDC_APPSTARTING, IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_HELP, IDC_IBEAM, IDC_NO, IDC_SIZEALL,
     IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, IDC_WAIT, IsIconic, IsWindowVisible,
     IsZoomed, KillTimer, LoadCursorW, LoadIconW, MSG, NCCALCSIZE_PARAMS, PostMessageW,
@@ -69,11 +71,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetCursor, SetForegroundWindow, SetTimer,
     SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, WINDOW_EX_STYLE,
     WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND,
-    WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST, WM_NCLBUTTONDBLCLK,
-    WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SETCURSOR, WM_SIZE, WM_SYSCHAR, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP,
-    WM_TIMER, WNDCLASSEXW, WS_CAPTION, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW, WS_POPUP,
+    WM_EXITSIZEMOVE, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+    WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST,
+    WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE,
+    WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR,
+    WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSEXW, WS_CAPTION,
+    WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_THICKFRAME,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -87,6 +90,38 @@ use crate::keymap;
 use crate::layout::Rect;
 use crate::quake::{self, QuakeWindow};
 use crate::taskbar::Taskbar;
+
+/// Windows' light or dark mode for apps.
+fn appearance() -> jet_config::Appearance {
+    let (mut light, mut size) = (0u32, 4u32);
+    let read = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"),
+            w!("AppsUseLightTheme"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some((&raw mut light).cast()),
+            Some(&mut size),
+        )
+    };
+    if read.is_ok() && light != 0 {
+        jet_config::Appearance::Light
+    } else {
+        jet_config::Appearance::Dark
+    }
+}
+
+/// WM_SETTINGCHANGE for the light or dark mode: "ImmersiveColorSet".
+fn color_set(lparam: LPARAM) -> bool {
+    if lparam.0 == 0 {
+        return false;
+    }
+    // SAFETY: for WM_SETTINGCHANGE a nonzero lparam is a NUL-terminated
+    // string naming what changed.
+    let what = unsafe { PCWSTR(lparam.0 as *const u16).to_string() };
+    what.is_ok_and(|w| w == "ImmersiveColorSet")
+}
 
 /// Posted by the pane thread when a snapshot or event is ready.
 const WM_APP_WAKE: u32 = WM_APP + 1;
@@ -284,7 +319,9 @@ impl Host for Win32 {
     }
 
     fn reconfigure_quake(&mut self, config: &jet_config::Quake) -> Option<String> {
-        let problem = self.quake.as_ref()?.register(&config.hotkey).err();
+        let window = self.quake.as_mut()?;
+        window.moved = None;
+        let problem = window.register(&config.hotkey).err();
         self.post(quake::WM_APP_PLACE);
         problem
     }
@@ -464,8 +501,13 @@ fn run_window(quake: bool, background: bool, first: First) -> Result<(), BoxErro
     if unsafe { RegisterClassExW(&class) } == 0 {
         return Err(windows::core::Error::from_thread().into());
     }
-    // The quake window is placed and shown by its hotkey.
-    let style = if quake { WS_POPUP } else { WS_OVERLAPPEDWINDOW };
+    // The quake window is placed and shown by its hotkey. Frameless, but
+    // with a sizing frame for its edges to resize by (see `calc_size`).
+    let style = if quake {
+        WS_POPUP | WS_THICKFRAME
+    } else {
+        WS_OVERLAPPEDWINDOW
+    };
     let hwnd = unsafe {
         CreateWindowExW(
             // Everything is drawn through the composition swapchain; a GDI
@@ -517,6 +559,7 @@ fn run_window(quake: bool, background: bool, first: First) -> Result<(), BoxErro
     let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
     let focused = unsafe { GetForegroundWindow() } == hwnd;
     let mut app = App::new(host, &instance, surface, dpi, focused, settings, start)?;
+    app.set_appearance(appearance());
     if !quake {
         let on = app.settings.config.quake.autostart;
         app.host.autostart(on);
@@ -549,7 +592,7 @@ fn run_window(quake: bool, background: bool, first: First) -> Result<(), BoxErro
             )?;
             let _ = ShowWindow(hwnd, SW_SHOW);
         } else if show_quake {
-            quake::show(hwnd, &placed, true);
+            quake::show(hwnd, &placed, None, true);
         }
     }
 
@@ -701,9 +744,11 @@ impl App<Win32> {
             WM_APP_FRAME => return After::Then(Box::new(frame_changed)),
             WM_APP_CLI => self.serve_cli(),
             WM_APP_RAISE => {
-                if self.host.quake.is_some() {
-                    let placed = self.settings.config.quake.clone();
-                    return After::Then(Box::new(move |hwnd| quake::show(hwnd, &placed, true)));
+                if let Some(window) = &self.host.quake {
+                    let (placed, moved) = (self.settings.config.quake.clone(), window.moved);
+                    return After::Then(Box::new(move |hwnd| {
+                        quake::show(hwnd, &placed, moved, true)
+                    }));
                 }
                 return After::Then(Box::new(raise));
             }
@@ -728,6 +773,21 @@ impl App<Win32> {
                 }
             }
             WM_DPICHANGED => return self.dpi_changed(wparam, lparam),
+            // Light or dark mode switched (among other things).
+            WM_SETTINGCHANGE if color_set(lparam) => {
+                self.set_appearance(appearance());
+                return After::Default;
+            }
+            // Dragged by the tab bar or sized from an edge: there it stays,
+            // this session.
+            WM_EXITSIZEMOVE => {
+                if let Some(window) = &mut self.host.quake {
+                    let mut r = RECT::default();
+                    if unsafe { GetWindowRect(self.host.hwnd, &mut r) }.is_ok() {
+                        window.moved = Some(r);
+                    }
+                }
+            }
             WM_HOTKEY | quake::WM_APP_TOGGLE => return self.toggle_quake(),
             WM_CLOSE | quake::WM_APP_HIDE if self.host.quake.is_some() => {
                 return After::Then(Box::new(quake::hide));
@@ -743,7 +803,9 @@ impl App<Win32> {
                 let placed = self.settings.config.quake.clone();
                 if self.host.quake.is_some() && unsafe { IsWindowVisible(self.host.hwnd) }.as_bool()
                 {
-                    return After::Then(Box::new(move |hwnd| quake::show(hwnd, &placed, false)));
+                    return After::Then(Box::new(move |hwnd| {
+                        quake::show(hwnd, &placed, None, false)
+                    }));
                 }
             }
             WM_APP_NOTIFY => match (lparam.0 & 0xFFFF) as u32 {
@@ -812,6 +874,10 @@ impl App<Win32> {
     /// the window but the side and bottom resize borders, and when
     /// maximized, the part hanging off the screen.
     fn calc_size(&self, wparam: WPARAM, lparam: LPARAM) -> After {
+        // The quake window's sizing frame takes no room: all client.
+        if wparam.0 != 0 && self.host.quake.is_some() {
+            return After::Result(0);
+        }
         if wparam.0 == 0 || self.decorations() == Decorations::System {
             return After::Default;
         }
@@ -828,6 +894,9 @@ impl App<Win32> {
     /// buttons (so Snap Layouts shows over maximize), and the empty parts
     /// of the title and tab bars to drag the window by.
     fn hit_test(&self, lparam: LPARAM) -> After {
+        if self.host.quake.is_some() {
+            return self.quake_edge(lparam);
+        }
         let decorations = self.decorations();
         if decorations == Decorations::System {
             return After::Default;
@@ -858,6 +927,34 @@ impl App<Win32> {
                 HTCAPTION
             }
             None => HTCLIENT,
+        };
+        After::Result(hit as isize)
+    }
+
+    /// The quake window's edges, to size it by; its sizing frame has no
+    /// room of its own (see `calc_size`), so they're the client's rim.
+    fn quake_edge(&self, lparam: LPARAM) -> After {
+        let mut at = POINT {
+            x: i32::from((lparam.0 & 0xFFFF) as u16 as i16),
+            y: i32::from(((lparam.0 >> 16) & 0xFFFF) as u16 as i16),
+        };
+        if !unsafe { ScreenToClient(self.host.hwnd, &mut at) }.as_bool() {
+            return After::Default;
+        }
+        let rim = unsafe { GetSystemMetricsForDpi(SM_CYFRAME, self.dpi) };
+        let (w, h) = (self.config.width as i32, self.config.height as i32);
+        let (left, right) = (at.x < rim, at.x >= w - rim);
+        let (top, bottom) = (at.y < rim, at.y >= h - rim);
+        let hit = match (left, right, top, bottom) {
+            (true, _, true, _) => HTTOPLEFT,
+            (_, true, true, _) => HTTOPRIGHT,
+            (true, _, _, true) => HTBOTTOMLEFT,
+            (_, true, _, true) => HTBOTTOMRIGHT,
+            (true, ..) => HTLEFT,
+            (_, true, ..) => HTRIGHT,
+            (_, _, true, _) => HTTOP,
+            (_, _, _, true) => HTBOTTOM,
+            _ => HTCLIENT,
         };
         After::Result(hit as isize)
     }
@@ -925,11 +1022,13 @@ impl App<Win32> {
         self.relayout(true);
         // SAFETY: for WM_DPICHANGED, lparam points to the suggested RECT.
         let suggested = unsafe { *(lparam.0 as *const RECT) };
-        // The quake window keeps its share of the monitor instead.
+        // The quake window keeps its share of the monitor instead, unless
+        // it's being dragged.
         let placed = self
             .host
             .quake
             .as_ref()
+            .filter(|window| window.moved.is_none())
             .and_then(|_| quake::placement_near(&self.settings.config.quake, &suggested));
         After::MoveTo(placed.unwrap_or(suggested))
     }
@@ -1003,7 +1102,10 @@ impl App<Win32> {
             self.new_tab(None);
         }
         let placed = self.settings.config.quake.clone();
-        After::Then(Box::new(move |hwnd| quake::show(hwnd, &placed, true)))
+        let moved = self.host.quake.as_ref().and_then(|window| window.moved);
+        After::Then(Box::new(move |hwnd| {
+            quake::show(hwnd, &placed, moved, true)
+        }))
     }
 
     fn wheel_msg(&mut self, wparam: WPARAM, lparam: LPARAM) {

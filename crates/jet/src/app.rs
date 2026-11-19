@@ -21,10 +21,10 @@ use jet_cli::{
     Answer, Body, Done, Event, Events, Failure, Hello, Listing, Opened, PaneInfo, Request, TabInfo,
     Text, What,
 };
-use jet_config::keybinds::{self, Action, Binding, Direction, SplitTarget};
+use jet_config::keybinds::{self, Action, Binding, Direction, SplitTarget, TabColor};
 use jet_config::plumb;
 use jet_config::status::{Shown, StatusPosition, mix};
-use jet_config::{Bell, Config, Decorations, Icon, TabBarPosition, TabBarShow};
+use jet_config::{Bell, Config, Decorations, Icon, TabBarPosition, TabBarShow, TabColorStyle};
 use jet_core::{
     Cell, CellFlags, CursorShape, Key, KeyInput, Line, Location, Mods, MouseAction, MouseButton,
     MouseInput, Occasion, Progress, Rgb, Snapshot, Underline,
@@ -127,8 +127,10 @@ trait Host {
     fn want_vblank(&mut self, _on: bool) {}
     /// Whether this is the quake window.
     fn quake(&self) -> bool;
-    /// The quake settings changed: re-register the hotkey, re-place the
-    /// window. Why the hotkey can't be had, if not.
+    /// The quake settings changed, or the window is to go back to them:
+    /// re-register the hotkey, re-place the window where they put it
+    /// (forgetting where it was dragged). Why the hotkey can't be had, if
+    /// not.
     fn reconfigure_quake(&mut self, quake: &jet_config::Quake) -> Option<String>;
     /// `quake.autostart` is `on`: run `jet quake` at sign-in and now, or
     /// stop running it at sign-in.
@@ -290,6 +292,8 @@ struct PaneSlot {
     cwd: Option<PathBuf>,
     /// The profile it was opened with; `None` is the default shell.
     profile: Option<String>,
+    /// The `[hosts]` rule its host matches, whose look it has.
+    host_rule: Option<String>,
     /// The same report, remote or not, and when it came.
     location: Option<Location>,
     location_at: Instant,
@@ -348,6 +352,8 @@ struct Tab {
     /// Set from the CLI over what the shell says and the profile's icon.
     title: Option<String>,
     icon: Option<Icon>,
+    /// Over its profile's or host's tab color: from `set_tab_color`.
+    color: Option<Rgb>,
     /// The focused split fills the tab; the others are hidden.
     zoomed: bool,
     /// A jetmux session's tab, which the daemon lays out.
@@ -362,6 +368,7 @@ impl Tab {
             focused: pane,
             title: None,
             icon: None,
+            color: None,
             zoomed: false,
             remote: None,
         }
@@ -527,7 +534,8 @@ impl<H: Host> App<H> {
                     None => {
                         let env = pane_env(&socket, FIRST_PANE);
                         let (cwd, command) = first.launch(config_now);
-                        spawn_shell(size, wake, config_now, cwd, command.as_ref(), &env)?
+                        let vt = config_now.profile_vt_settings(first.profile.as_deref());
+                        spawn_shell(size, wake, config_now, vt, cwd, command.as_ref(), &env)?
                     }
                 };
                 Ok((fonts, pane))
@@ -675,7 +683,8 @@ impl<H: Host> App<H> {
         let size = pty_size(grid, self.renderer.cell_metrics())?;
         let env = pane_env(&self.socket, self.next_pane);
         let wake = self.host.waker(Wake::Panes);
-        let pane = spawn_shell(size, wake, config, cwd, command, &env)?;
+        let vt = config.profile_vt_settings(name);
+        let pane = spawn_shell(size, wake, config, vt, cwd, command, &env)?;
         Ok(self.adopt(pane, grid, name))
     }
 
@@ -705,6 +714,7 @@ impl<H: Host> App<H> {
                 progress: Progress::Hidden,
                 cwd: None,
                 profile: profile.map(str::to_owned),
+                host_rule: None,
                 location: None,
                 location_at: Instant::now(),
                 vars: HashMap::new(),
@@ -768,6 +778,7 @@ impl<H: Host> App<H> {
                             slot.location = location;
                             slot.location_at = Instant::now();
                         }
+                        self.refresh_host(id);
                         if let Some(what) = what {
                             self.emit(what, Some(id));
                         }
@@ -820,6 +831,7 @@ impl<H: Host> App<H> {
                         if let Some(slot) = self.panes.get_mut(&id) {
                             slot.context = context;
                         }
+                        self.refresh_host(id);
                         dirty = true;
                     }
                     PaneEvent::Copy(text) => {
@@ -1251,6 +1263,7 @@ impl<H: Host> App<H> {
         if chrome.buttons[0].w > 0 {
             self.button_quads(&chrome, colors, &mut overlays);
         }
+        self.tab_color_lines(colors, &mut overlays);
         self.close_quads(colors, &mut overlays);
         for (id, rect, snapshot) in &shown {
             grids.push(Grid {
@@ -1359,7 +1372,7 @@ impl<H: Host> App<H> {
         let active_bg =
             (solid || config.tab_bar.active_background.is_some()).then_some(c.active_background);
         let hover_bg = mix(c.background, c.active_foreground, 0.12);
-        let style = |active: bool, hovered: bool| {
+        let style = |active: bool, hovered: bool, color: Option<(Rgb, TabColorStyle)>| {
             let mut cell = Cell::default();
             if active {
                 (cell.fg, cell.bg) = (Some(c.active_foreground), active_bg);
@@ -1370,13 +1383,43 @@ impl<H: Host> App<H> {
             if hovered && !active {
                 (cell.fg, cell.bg) = (Some(c.active_foreground), Some(hover_bg));
             }
+            // The profile's color, at full strength on the active tab.
+            let strength = if active {
+                1.0
+            } else if hovered {
+                0.75
+            } else {
+                0.55
+            };
+            match color {
+                Some((color, TabColorStyle::Fill)) => {
+                    let bg = mix(c.background, color, strength);
+                    (cell.fg, cell.bg) = (Some(readable_on(bg)), Some(bg));
+                }
+                Some((color, TabColorStyle::Text)) => {
+                    cell.fg = Some(mix(c.background, color, strength.max(0.75)));
+                }
+                _ => {}
+            }
             cell
         };
+        let tab_colors: Vec<_> = self.tabs.iter().map(|t| self.tab_color(t)).collect();
         // A tab under the mouse gets a close button in its last cells.
         let hover = self.tab_hover;
         let push_tab = |line: &mut Line, i: usize, text: &str, width: usize| {
             let hot = hover.filter(|(h, _)| *h == i);
-            let tab = style(i == self.active, hot.is_some());
+            let color = tab_colors.get(i).copied().flatten();
+            let tab = style(i == self.active, hot.is_some(), color);
+            // A dot takes the place of the title's leading space.
+            let (text, width) = match (color, text.strip_prefix(' ')) {
+                (Some((color, TabColorStyle::Dot)), Some(rest)) if width > 1 => {
+                    let mut dot = tab;
+                    dot.fg = Some(color);
+                    line.push_text("●", 1, dot);
+                    (rest, width - 1)
+                }
+                _ => (text, width),
+            };
             // Its last two cells stay blank for the close button, drawn
             // over them.
             if hot.is_some() && width > 3 {
@@ -1548,6 +1591,20 @@ impl<H: Host> App<H> {
                 let index = self.tab_index(&label.target)?;
                 if let Some(tab) = self.tabs.get_mut(index) {
                     tab.title = label.value;
+                }
+                self.render();
+                done
+            }
+            Request::SetColor(label) => {
+                let index = self.tab_index(&label.target)?;
+                let color = match label.value.as_deref() {
+                    None => None,
+                    Some(text) => Some(jet_config::parse_color(text).ok_or_else(|| {
+                        Failure::new("bad_color", format!("{text:?} isn't a #rrggbb color"))
+                    })?),
+                };
+                if let Some(tab) = self.tabs.get_mut(index) {
+                    tab.color = color;
                 }
                 self.render();
                 done
@@ -1846,10 +1903,12 @@ impl<H: Host> App<H> {
         changed
     }
 
-    /// Look up what the focused pane is running, for the status: `ssh`
-    /// and where to. Once a second, so only while there's a status.
+    /// Look up what the focused pane is running, for the status and
+    /// `[hosts]`: `ssh` and where to. Once a second, so only while there's
+    /// a status or a host rule.
     fn poll_session(&mut self) {
-        if self.settings.config.status.segments.is_empty() {
+        let config = &self.settings.config;
+        if config.status.segments.is_empty() && config.hosts.is_empty() {
             return;
         }
         let since = std::mem::replace(&mut self.polled, Instant::now());
@@ -1877,9 +1936,42 @@ impl<H: Host> App<H> {
             });
         }
         slot.front_cwd = pid.and_then(jet_pty::process_cwd);
-        if self.refresh_status() {
+        let restyled = self.refresh_host(id);
+        if self.refresh_status() || restyled {
             self.render();
         }
+    }
+
+    /// Give pane `id` the look of the `[hosts]` rule its host matches, if
+    /// that changed; whether it did.
+    fn refresh_host(&mut self, id: PaneId) -> bool {
+        let config = &self.settings.config;
+        let Some(slot) = self.panes.get(&id) else {
+            return false;
+        };
+        let rule = if config.hosts.is_empty() {
+            None
+        } else {
+            let ssh = slot.front.as_ref().and_then(|f| f.ssh.as_ref());
+            let session = jet_config::status::Session {
+                location: slot.location.as_ref(),
+                ssh,
+                context: slot.context.as_ref(),
+                local_host: &self.local_host,
+                ..Default::default()
+            };
+            let host = session.value(&jet_config::status::Field::Host);
+            host.and_then(|h| config.host_rule(&h)).map(str::to_owned)
+        };
+        if rule == slot.host_rule {
+            return false;
+        }
+        slot.pane
+            .configure(config.pane_vt_settings(slot.profile.as_deref(), rule.as_deref()));
+        if let Some(slot) = self.panes.get_mut(&id) {
+            slot.host_rule = rule;
+        }
+        true
     }
 
     /// The status as a little screen: a row, or a column at the foot of a
@@ -2024,8 +2116,8 @@ impl<H: Host> App<H> {
         Some((i, on_close))
     }
 
-    /// The close button's slot on tab `i`: its last two cells.
-    fn close_area(&self, i: usize) -> Option<Rect> {
+    /// Tab `i`'s cells in the tab bar.
+    fn tab_cells(&self, i: usize) -> Option<Rect> {
         let r = self.chrome().tabs;
         if r.h == 0 {
             return None;
@@ -2034,18 +2126,93 @@ impl<H: Host> App<H> {
         let (cw, ch) = (m.width as i32, m.height as i32);
         let pad = self.renderer.padding() as i32;
         let (cols, _) = self.cells_in(r);
-        let (col, y) = if self.vertical_tabs() {
-            (cols as i32 - 2, r.y + pad + i as i32 * ch)
+        let i = i as i32;
+        Some(if self.vertical_tabs() {
+            Rect {
+                x: r.x + pad,
+                y: r.y + pad + i * ch,
+                w: cols as i32 * cw,
+                h: ch,
+            }
         } else {
-            let width = self.tab_width(cols) as i32;
-            (i as i32 * width + width - 2, r.y + (r.h - ch).max(0) / 2)
-        };
-        Some(Rect {
-            x: r.x + pad + col * cw,
-            y,
-            w: 2 * cw,
-            h: ch,
+            let width = self.tab_width(cols) as i32 * cw;
+            Rect {
+                x: r.x + pad + i * width,
+                y: r.y + (r.h - ch).max(0) / 2,
+                w: width,
+                h: ch,
+            }
         })
+    }
+
+    /// The close button's slot on tab `i`: its last two cells.
+    fn close_area(&self, i: usize) -> Option<Rect> {
+        let tab = self.tab_cells(i)?;
+        let cw = self.renderer.cell_metrics().width as i32;
+        Some(Rect {
+            x: tab.x + tab.w - 2 * cw,
+            w: 2 * cw,
+            ..tab
+        })
+    }
+
+    /// A tab's color, if it has one, and how it shows: its own, else its
+    /// focused pane's host rule's, else that pane's profile's.
+    fn tab_color(&self, tab: &Tab) -> Option<(Rgb, TabColorStyle)> {
+        let config = &self.settings.config;
+        let slot = self.panes.get(&tab.focused);
+        let profile = slot
+            .and_then(|s| s.profile.as_deref())
+            .and_then(|name| config.profiles.get(name));
+        let host = slot
+            .and_then(|s| s.host_rule.as_deref())
+            .and_then(|name| config.hosts.get(name));
+        let color = tab
+            .color
+            .or_else(|| host.and_then(|h| h.tab_color).map(|c| c.0))
+            .or_else(|| profile.and_then(|p| p.tab_color).map(|c| c.0))?;
+        let style = host
+            .and_then(|h| h.color_style)
+            .or_else(|| profile.and_then(|p| p.color_style))
+            .unwrap_or(config.tab_bar.color_style);
+        Some((color, style))
+    }
+
+    /// With a line style for `tab-color`, each colored tab's line, dimmer
+    /// off the active tab.
+    fn tab_color_lines(&self, colors: jet_core::Colors, out: &mut Vec<Quad>) {
+        let thick = (2.0 * self.dpi as f32 / 96.0).round().max(1.0) as i32;
+        let background = self.bar_colors(colors).background;
+        for (i, tab) in self.tabs.iter().enumerate() {
+            let (Some((color, style)), Some(r)) = (self.tab_color(tab), self.tab_cells(i)) else {
+                continue;
+            };
+            let line = match style {
+                TabColorStyle::Top => Rect { h: thick, ..r },
+                TabColorStyle::Bottom => Rect {
+                    y: r.y + r.h - thick,
+                    h: thick,
+                    ..r
+                },
+                TabColorStyle::Left => Rect { w: thick, ..r },
+                TabColorStyle::Right => Rect {
+                    x: r.x + r.w - thick,
+                    w: thick,
+                    ..r
+                },
+                TabColorStyle::Fill | TabColorStyle::Dot | TabColorStyle::Text => continue,
+            };
+            let color = if i == self.active {
+                color
+            } else {
+                mix(background, color, 0.55)
+            };
+            out.push(Quad {
+                pos: [line.x as f32, line.y as f32],
+                size: [line.w as f32, line.h as f32],
+                color: jet_render::rgba(color),
+            });
+        }
     }
 
     /// The hovered tab's close button: an X, on a red square when the
@@ -2218,11 +2385,14 @@ impl<H: Host> App<H> {
         let old = std::mem::replace(&mut self.settings.config, new);
         let new = &self.settings.config;
         self.bindings = new.bindings().unwrap_or_default();
-        if new.vt_settings() != old.vt_settings() {
-            for slot in self.panes.values() {
-                slot.pane.configure(new.vt_settings());
+        for slot in self.panes.values() {
+            let (profile, host) = (slot.profile.as_deref(), slot.host_rule.as_deref());
+            let settings = new.pane_vt_settings(profile, host);
+            if settings != old.pane_vt_settings(profile, host) {
+                slot.pane.configure(settings);
             }
         }
+
         let quake_changed = new.quake != old.quake;
         let frame_changed = new.window != old.window
             || new.vt_settings() != old.vt_settings()
@@ -2232,13 +2402,8 @@ impl<H: Host> App<H> {
         if new.quake.autostart != old.quake.autostart && !self.host.quake() {
             self.host.autostart(new.quake.autostart);
         }
-        if quake_changed && self.host.quake() {
-            let problem = self.host.reconfigure_quake(&self.settings.config.quake);
-            if problem != self.hotkey_problem {
-                self.hotkey_problem = problem;
-                self.banner_dismissed = false;
-                self.refresh_banner();
-            }
+        if quake_changed {
+            self.reconfigure_quake();
         }
         if frame_changed {
             self.renderer
@@ -2259,7 +2424,20 @@ impl<H: Host> App<H> {
         if fonts_changed || bar_changed {
             self.relayout(true);
         }
+        // The rules may have changed: each pane's match.
+        let ids: Vec<PaneId> = self.panes.keys().copied().collect();
+        for id in ids {
+            self.refresh_host(id);
+        }
         self.render();
+    }
+
+    /// The system went light or dark: load the config's theme for it.
+    pub fn set_appearance(&mut self, appearance: jet_config::Appearance) {
+        if self.settings.dirs.appearance != appearance {
+            self.settings.dirs.appearance = appearance;
+            self.reload_config(true);
+        }
     }
 
     fn perform(&mut self, action: Action) {
@@ -2357,6 +2535,16 @@ impl<H: Host> App<H> {
                     self.render();
                 }
             }
+            Action::SetTabColor(TabColor::Pick) => self.choose_tab_color(),
+            Action::SetTabColor(color) => {
+                if let Some(tab) = self.tabs.get_mut(self.active) {
+                    tab.color = match color {
+                        TabColor::Set(rgb) => Some(rgb),
+                        TabColor::Pick | TabColor::Clear => None,
+                    };
+                    self.render();
+                }
+            }
             Action::MoveTab(n) => self.move_tab(n),
             Action::StartSearch => {
                 if let Some(id) = focused
@@ -2397,6 +2585,7 @@ impl<H: Host> App<H> {
             Action::Ignore => {}
             Action::Detach => self.detach(),
             Action::OpenConfig => self.open_config(),
+            Action::ResetQuake => self.reconfigure_quake(),
             Action::ChooseTheme => self.choose_theme(),
             Action::NewTabMenu => self.new_tab_menu(),
             Action::CopyVersion => {
@@ -2496,7 +2685,7 @@ impl<H: Host> App<H> {
     /// selected.
     fn choose_theme(&mut self) {
         let themes = self.settings.dirs.themes();
-        let current = self.settings.config.theme.name.clone();
+        let current = self.active_theme().map(str::to_owned);
         let commands = themes
             .into_iter()
             .map(|name| PaletteCommand {
@@ -2517,8 +2706,25 @@ impl<H: Host> App<H> {
         self.previewing = Some(self.settings.config.clone());
     }
 
-    /// Set `[theme] name` in the config file and load it.
+    /// The `[theme]` key in effect, for the system's light or dark mode,
+    /// and its theme.
+    fn theme_key(&self) -> &'static str {
+        let appearance = self.settings.dirs.appearance;
+        self.settings.config.theme.key(appearance)
+    }
+
+    fn active_theme(&self) -> Option<&str> {
+        let theme = &self.settings.config.theme;
+        match self.theme_key() {
+            "light" => theme.light.as_deref(),
+            "dark" => theme.dark.as_deref(),
+            _ => theme.name.as_deref(),
+        }
+    }
+
+    /// Set the `[theme]` key in effect in the config file and load it.
     fn write_theme(&mut self, name: &str) {
+        let key = self.theme_key();
         let written = (|| -> Result<(), String> {
             let path = self
                 .settings
@@ -2530,9 +2736,9 @@ impl<H: Host> App<H> {
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
                 Err(err) => return Err(format!("{}: {err}", path.display())),
             };
-            let new = jet_config::with_theme(&text, name).ok_or_else(|| {
+            let new = jet_config::with_theme(&text, key, name).ok_or_else(|| {
                 format!(
-                    "set [theme] name = \"{name}\" by hand in {}",
+                    "set [theme] {key} = \"{name}\" by hand in {}",
                     path.display()
                 )
             })?;
@@ -2542,7 +2748,7 @@ impl<H: Host> App<H> {
             std::fs::write(&path, new).map_err(|e| format!("{}: {e}", path.display()))
         })();
         self.reload_config(true);
-        let took = self.settings.config.theme.name.as_deref() == Some(name);
+        let took = self.active_theme() == Some(name);
         let problem = match written {
             Err(err) => Some(format!("theme: {err}")),
             Ok(()) if !took && self.settings.error.is_none() => Some(format!(
@@ -2591,6 +2797,38 @@ impl<H: Host> App<H> {
             }
         }
         self.host.open_file(&path);
+    }
+
+    /// Colors to give the active tab, over its profile's or host's.
+    fn choose_tab_color(&mut self) {
+        const COLORS: [(&str, u32); 9] = [
+            ("Red", 0xe5484d),
+            ("Orange", 0xf76b15),
+            ("Yellow", 0xffc53d),
+            ("Green", 0x46a758),
+            ("Teal", 0x12a594),
+            ("Blue", 0x0090ff),
+            ("Purple", 0x8e4ec6),
+            ("Pink", 0xd6409f),
+            ("Grey", 0x8b8d98),
+        ];
+        let rgb = |c: u32| Rgb {
+            r: (c >> 16) as u8,
+            g: (c >> 8) as u8,
+            b: c as u8,
+        };
+        let mut answers: Vec<(String, Choice)> = COLORS
+            .into_iter()
+            .map(|(name, c)| {
+                let action = Action::SetTabColor(TabColor::Set(rgb(c)));
+                (format!("{name} (#{c:06x})"), Choice::Run(action))
+            })
+            .collect();
+        answers.push((
+            "None: what the config gives it".into(),
+            Choice::Run(Action::SetTabColor(TabColor::Clear)),
+        ));
+        self.ask("tab color", answers);
     }
 
     /// The profiles to open a tab with.
@@ -2739,6 +2977,19 @@ impl<H: Host> App<H> {
         }
     }
 
+    /// The quake window per `[quake]` again, hotkey and place.
+    fn reconfigure_quake(&mut self) {
+        if !self.host.quake() {
+            return;
+        }
+        let problem = self.host.reconfigure_quake(&self.settings.config.quake);
+        if problem != self.hotkey_problem {
+            self.hotkey_problem = problem;
+            self.banner_dismissed = false;
+            self.refresh_banner();
+        }
+    }
+
     /// What the palette offers: every action worth a name, the profiles,
     /// and the tabs to switch to.
     fn palette_commands(&self) -> Vec<PaletteCommand> {
@@ -2775,6 +3026,9 @@ impl<H: Host> App<H> {
         if self.tab().is_some_and(|t| t.remote.is_some()) {
             list.push(("Detach jetmux session".into(), Action::Detach));
         }
+        if self.host.quake() {
+            list.push(("Quake: reset position".into(), Action::ResetQuake));
+        }
         list.push((format!("About: {} (copy)", version()), Action::CopyVersion));
         list.extend([
             ("Open config".into(), Action::OpenConfig),
@@ -2796,6 +3050,7 @@ impl<H: Host> App<H> {
                 Action::CopyCommandOutput,
             ),
             ("Rename tab".into(), Action::RenameTab),
+            ("Set tab color".into(), Action::SetTabColor(TabColor::Pick)),
             ("Move tab left".into(), Action::MoveTab(-1)),
             ("Move tab right".into(), Action::MoveTab(1)),
             ("Equalize splits".into(), Action::EqualizeSplits),
@@ -2975,6 +3230,7 @@ impl<H: Host> App<H> {
             .into_iter()
             .map(|tab| session::Tab {
                 title: tab.title.clone(),
+                color: tab.color.map(|c| [c.r, c.g, c.b]),
                 root: self.saved(&tab.root),
                 focused: tab
                     .root
@@ -3037,6 +3293,7 @@ impl<H: Host> App<H> {
             let mut tab = Tab::new(id.unwrap_or_else(|| self.take_tab_id()), lead);
             tab.focused = panes.get(saved.focused).copied().unwrap_or(lead);
             tab.title = saved.title;
+            tab.color = saved.color.map(|[r, g, b]| Rgb { r, g, b });
             tab.root = root;
             tabs.push(tab);
         }
@@ -3429,15 +3686,13 @@ impl<H: Host> App<H> {
             if let Some((i, on_close)) = self.tab_hit(x, y) {
                 match button {
                     MouseButton::Left if on_close => self.ask_close_tab(i),
-                    // A plain window drags by its tabs too; the quake
-                    // window stays where it's placed.
-                    MouseButton::Left if !self.host.quake() => {
+                    // The window drags by its tabs too.
+                    MouseButton::Left => {
                         self.activate_tab(i);
                         self.host.capture(true);
                         self.tab_press = Some((x, y));
                         return;
                     }
-                    MouseButton::Left => self.activate_tab(i),
                     MouseButton::Middle => self.ask_close_tab(i),
                     MouseButton::Right => self.new_tab_menu(),
                 }
@@ -3940,6 +4195,10 @@ pub struct First {
     pub command: Option<Vec<String>>,
 }
 
+/// What `jet quake` started in the background is run with: it stays
+/// hidden until the hotkey, and leaves a running one alone.
+pub const BACKGROUND: &str = "--background";
+
 pub const USAGE: &str = "usage: jet [DIR] [--profile NAME] [-e COMMAND [ARGS...]]
        jet quake
        jet config check
@@ -4053,7 +4312,8 @@ impl EarlyShell {
         let socket = cli_transport::address_for(std::process::id());
         let env = pane_env(&socket, FIRST_PANE);
         let (cwd, command) = first.launch(config);
-        let pane = spawn_shell(size, relay, config, cwd, command.as_ref(), &env)?;
+        let vt = config.profile_vt_settings(first.profile.as_deref());
+        let pane = spawn_shell(size, relay, config, vt, cwd, command.as_ref(), &env)?;
         Ok(Self {
             pane,
             profile: first.profile.clone(),
@@ -4237,10 +4497,30 @@ fn run_detached(argv: &[String], cwd: Option<&std::path::Path>) -> Result<(), Bo
     Ok(())
 }
 
+/// Black or white text, whichever reads on `bg`.
+fn readable_on(bg: Rgb) -> Rgb {
+    let luma = 0.299 * f32::from(bg.r) + 0.587 * f32::from(bg.g) + 0.114 * f32::from(bg.b);
+    if luma > 150.0 {
+        Rgb {
+            r: 16,
+            g: 16,
+            b: 16,
+        }
+    } else {
+        Rgb {
+            r: 255,
+            g: 255,
+            b: 255,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn spawn_shell(
     size: Size,
     wake: Arc<dyn Fn() + Send + Sync>,
     config: &Config,
+    settings: jet_core::VtSettings,
     cwd: Option<PathBuf>,
     profile: Option<&jet_config::Command>,
     env: &[(&str, String)],
@@ -4263,7 +4543,7 @@ fn spawn_shell(
             },
             size,
             scrollback: config.terminal.scrollback,
-            settings: config.vt_settings(),
+            settings: settings.clone(),
         }
     };
     let flag: Vec<String> = std::env::args()

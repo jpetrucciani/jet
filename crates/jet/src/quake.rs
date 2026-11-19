@@ -8,13 +8,13 @@ use windows::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, LPARAM, POINT, RECT, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY, MONITORINFO,
-    MonitorFromPoint, MonitorFromRect, MonitorFromWindow,
+    GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL,
+    MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint, MonitorFromRect, MonitorFromWindow,
 };
 use windows::Win32::System::Registry::{
     HKEY_CURRENT_USER, REG_SZ, RegDeleteKeyValueW, RegSetKeyValueW,
 };
-use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::System::Threading::{AttachThreadInput, CreateMutexW, GetCurrentThreadId};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, RegisterHotKey, UnregisterHotKey,
 };
@@ -22,11 +22,12 @@ use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, DestroyWindow, FindWindowW, GWL_EXSTYLE,
-    GetCursorPos, HICON, HWND_NOTOPMOST, HWND_TOPMOST, MF_STRING, PostMessageW,
-    RegisterWindowMessageW, SW_HIDE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_SHOWWINDOW,
-    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    AppendMenuW, BringWindowToTop, CreatePopupMenu, DestroyMenu, DestroyWindow, FindWindowW,
+    GWL_EXSTYLE, GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId, HICON,
+    HWND_NOTOPMOST, HWND_TOPMOST, MF_STRING, PostMessageW, RegisterWindowMessageW, SW_HIDE,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetForegroundWindow, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP,
+    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -88,6 +89,9 @@ const RUN_VALUE: PCWSTR = w!("jet quake");
 
 /// What an uninstaller runs: `jet quake --uninstall`.
 pub const UNINSTALL: &str = "--uninstall";
+/// What the installer runs once done: `jet quake --autostart`, which does
+/// what `quake.autostart` says and exits.
+pub const AUTOSTART: &str = "--autostart";
 
 /// Undo autostart for an uninstall: drop the sign-in entry and quit the
 /// running quake, so nothing points at or holds the files being removed.
@@ -97,10 +101,6 @@ pub fn uninstall() {
         let _ = unsafe { PostMessageW(Some(hwnd), WM_APP_QUIT, WPARAM(0), LPARAM(0)) };
     }
 }
-
-/// What `jet quake` started in the background is run with: it stays
-/// hidden until the hotkey, and leaves a running one alone.
-pub const BACKGROUND: &str = "--background";
 
 /// `quake.autostart`: have `jet quake` (this jet.exe) run at sign-in, and
 /// start it now if it isn't running; or neither.
@@ -113,11 +113,15 @@ pub fn autostart(on: bool) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("quake.autostart: {e}"))?;
     if running().is_none() {
         std::process::Command::new(&exe)
-            .args(["quake", BACKGROUND])
+            .args(["quake", crate::app::BACKGROUND])
             .spawn()
             .map_err(|e| format!("quake.autostart: starting jet quake: {e}"))?;
     }
-    let line = HSTRING::from(format!("\"{}\" quake {BACKGROUND}", exe.display()));
+    let line = HSTRING::from(format!(
+        "\"{}\" quake {}",
+        exe.display(),
+        crate::app::BACKGROUND
+    ));
     let bytes = u32::try_from((line.len() + 1) * 2).map_err(|e| e.to_string())?;
     let err = unsafe {
         RegSetKeyValueW(
@@ -138,6 +142,9 @@ pub struct QuakeWindow {
     icon: HICON,
     /// Explorer's broadcast after it restarts: the tray icon is gone.
     pub taskbar_created: u32,
+    /// Where the user last dragged or sized the window to, kept for the
+    /// session in place of `[quake]`'s placement.
+    pub moved: Option<RECT>,
 }
 
 impl QuakeWindow {
@@ -146,6 +153,7 @@ impl QuakeWindow {
             hwnd,
             icon,
             taskbar_created: unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) },
+            moved: None,
         };
         this.add_tray_icon();
         this
@@ -238,9 +246,12 @@ pub fn placement_near(quake: &Quake, suggested: &RECT) -> Option<RECT> {
     })
 }
 
-/// Show (or with `!activate`, just move) the window per `quake`. Sends
+/// Show (or with `!activate`, just move) the window at `moved`, or per
+/// `quake` when it wasn't moved or that's on no monitor now. Sends
 /// messages: call with `App` released.
-pub fn show(hwnd: HWND, quake: &Quake, activate: bool) {
+pub fn show(hwnd: HWND, quake: &Quake, moved: Option<RECT>, activate: bool) {
+    let on_screen =
+        moved.filter(|r| !unsafe { MonitorFromRect(r, MONITOR_DEFAULTTONULL) }.is_invalid());
     let monitor = if !activate {
         unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) }
     } else {
@@ -255,7 +266,7 @@ pub fn show(hwnd: HWND, quake: &Quake, activate: bool) {
             },
         }
     };
-    let Some(r) = placement(quake, monitor) else {
+    let Some(r) = on_screen.or_else(|| placement(quake, monitor)) else {
         return eprintln!("jet: can't find the monitor to show on");
     };
     let ex = if quake.taskbar {
@@ -269,17 +280,38 @@ pub fn show(hwnd: HWND, quake: &Quake, activate: bool) {
     } else {
         HWND_NOTOPMOST
     };
-    let mut flags = SWP_SHOWWINDOW | SWP_FRAMECHANGED;
-    if !activate {
-        flags |= SWP_NOACTIVATE;
-    }
+    // Shown without activating: activating here, from the background, can
+    // be refused, and a refused activation comes back as a deactivation
+    // that hide-on-blur takes for leaving: the window flashes and hides.
+    let flags = SWP_SHOWWINDOW | SWP_FRAMECHANGED | SWP_NOACTIVATE;
     let (w, h) = (r.right - r.left, r.bottom - r.top);
     if let Err(err) = unsafe { SetWindowPos(hwnd, Some(order), r.left, r.top, w, h, flags) } {
         eprintln!("jet: placing the quake window: {err}");
     }
     if activate {
-        // The hotkey (or tray click) is the last input, so this is allowed.
-        let _ = unsafe { SetForegroundWindow(hwnd) };
+        come_forward(hwnd);
+    }
+}
+
+/// Into the foreground. The hotkey (or tray click) being the last input
+/// usually allows it, but Windows' foreground lock can still refuse (an
+/// elevated window or the Start menu in front); sharing the foreground
+/// thread's input for the moment gets past that.
+fn come_forward(hwnd: HWND) {
+    if unsafe { SetForegroundWindow(hwnd) }.as_bool() && unsafe { GetForegroundWindow() } == hwnd {
+        return;
+    }
+    let front = unsafe { GetForegroundWindow() };
+    let theirs = unsafe { GetWindowThreadProcessId(front, None) };
+    let ours = unsafe { GetCurrentThreadId() };
+    if theirs == 0 || theirs == ours {
+        return;
+    }
+    let joined = unsafe { AttachThreadInput(ours, theirs, true) }.as_bool();
+    let _ = unsafe { BringWindowToTop(hwnd) };
+    let _ = unsafe { SetForegroundWindow(hwnd) };
+    if joined {
+        let _ = unsafe { AttachThreadInput(ours, theirs, false) };
     }
 }
 

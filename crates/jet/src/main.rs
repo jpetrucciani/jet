@@ -76,22 +76,31 @@ fn main() -> ExitCode {
             }
         }
     };
+    let background = quake && args.get(1).is_some_and(|a| a == app::BACKGROUND);
     #[cfg(windows)]
     {
         if quake && args.get(1).is_some_and(|a| a == quake::UNINSTALL) {
             quake::uninstall();
             return ExitCode::SUCCESS;
         }
-        let background = quake && args.get(1).is_some_and(|a| a == quake::BACKGROUND);
+        if quake && args.get(1).is_some_and(|a| a == quake::AUTOSTART) {
+            // A config that doesn't load: the default, on.
+            let config = jet_config::load(&jet_config::Dirs::from_env());
+            let on = config.map_or(true, |l| l.config.quake.autostart);
+            return match quake::autostart(on) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(_) => ExitCode::FAILURE,
+            };
+        }
         app::win32::run(quake, background, first)
     }
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
-        app::winit::run(quake, first)
+        app::winit::run(quake, background, first)
     }
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
-        let _ = (quake, first);
+        let _ = (quake, background, first);
         eprintln!("jet: no window backend for this platform");
         ExitCode::FAILURE
     }

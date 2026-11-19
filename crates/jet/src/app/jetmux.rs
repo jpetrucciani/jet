@@ -152,7 +152,7 @@ impl<H: Host> App<H> {
         }
         let grid = self.current_grid();
         let m = self.renderer.cell_metrics();
-        let settings = self.settings.config.vt_settings();
+        let settings = self.settings.config.profile_vt_settings(Some(&profile));
         let mut adopted = HashMap::new();
         for (id, pane) in new {
             pane.configure(settings.clone());

@@ -47,6 +47,8 @@ let
     '';
   };
   jetmuxTarget = "x86_64-unknown-linux-musl";
+  # The one version, from [workspace.package].
+  version = (pkgs.lib.importTOML ./Cargo.toml).workspace.package.version;
   node = pkgs.nodejs_22;
   rustPlatform = pkgs.makeRustPlatform {
     cargo = rust;
@@ -55,7 +57,7 @@ let
   # The web UI jetmux-web embeds, built from its pnpm lockfile.
   webUi = pkgs.stdenvNoCC.mkDerivation (finalAttrs: {
     pname = "jetmux-web-ui";
-    version = "0.1.0";
+    inherit version;
     src = pkgs.lib.fileset.toSource {
       root = ./crates/jetmux-web/web;
       fileset = pkgs.lib.fileset.difference ./crates/jetmux-web/web (pkgs.lib.fileset.unions [
@@ -84,7 +86,7 @@ let
 
   jetmux = rustPlatform.buildRustPackage {
     pname = "jetmux";
-    version = "0.1.0";
+    inherit version;
     src = pkgs.lib.fileset.toSource {
       root = ./.;
       # The UI comes in prebuilt from webUi, without node_modules.
@@ -169,6 +171,18 @@ let
           sha256 = "1wkhckzlqlvd4a265qdrd6w2ad0n64k654wrrhyclhnddbi84pnj";
         }}
         section "JetBrains Mono (SIL Open Font License 1.1)" "jet-font (https://github.com/JetBrains/JetBrainsMono)" ${./crates/jet-font/fonts/OFL.txt}
+        section "Grapebox (MIT License)" "jet-config's Grapebox theme (https://github.com/fisherrjd/Grapebox)" ${pkgs.fetchurl {
+          url = "https://raw.githubusercontent.com/fisherrjd/Grapebox/c4d500540a8ecdd445fb1a3841a4f50cf85ef5b4/LICENSE";
+          sha256 = "1ddlxv3a799c4b7nfxfmsdiipds1yic666s50hbzcm2dpdxq95cj";
+        }}
+        section "Dank Neon (MIT License)" "jet-config's Dank Neon themes (https://github.com/DankNeon/vscode)" ${pkgs.fetchurl {
+          url = "https://raw.githubusercontent.com/DankNeon/vscode/82907aeeb98be16c6854768d12255e9410b69692/LICENSE";
+          sha256 = "1wqd3xmzk99x1aqyqanc1jqnr4ik83pc9ynxxipbrsasr6vy00d4";
+        }}
+        section "Nu Disco (MIT License)" "jet-config's Nu Disco themes (https://github.com/dbanksdesign/nu-disco-vscode-theme)" ${pkgs.fetchurl {
+          url = "https://raw.githubusercontent.com/dbanksdesign/nu-disco-vscode-theme/6e439509c93ec924cf5a449649ab5907dce2dabc/LICENSE";
+          sha256 = "1wc4qjalqld3rwwfgl6d6j9a1p7r63g1nd6ipmay2zzr2n2hyc1x";
+        }}
         section "iTerm2-Color-Schemes (MIT License)" "jet-config's built-in themes (https://github.com/mbadolato/iTerm2-Color-Schemes)" ${pkgs.fetchurl {
           url = "https://raw.githubusercontent.com/mbadolato/iTerm2-Color-Schemes/494b809/LICENSE";
           sha256 = "14ni18g6q3s2mn5xb1zng7did0k04hq3kswrzx6lj9xm2j31cwr3";

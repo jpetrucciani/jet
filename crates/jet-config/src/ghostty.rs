@@ -70,7 +70,9 @@ pub(crate) fn translate(pairs: &[(String, String)]) -> (Table, Vec<String>) {
                 true
             }
             "theme" => {
-                set(&mut out, "theme", "name", Value::String(theme_name(value)));
+                for (key, name) in theme_names(value) {
+                    set(&mut out, "theme", key, Value::String(name));
+                }
                 true
             }
             "palette" => match value.split_once('=') {
@@ -210,13 +212,24 @@ pub(crate) fn translate(pairs: &[(String, String)]) -> (Table, Vec<String>) {
     (out, skipped)
 }
 
-/// Ghostty's `light:A,dark:B` pairs: jet doesn't follow the system theme
-/// yet, so the dark one.
-fn theme_name(value: &str) -> String {
-    let dark = value
+/// A theme name, or Ghostty's `light:A,dark:B` pair: as `[theme]` keys.
+fn theme_names(value: &str) -> Vec<(&'static str, String)> {
+    let mut out: Vec<(&'static str, String)> = value
         .split(',')
-        .find_map(|part| part.trim().strip_prefix("dark:"));
-    dark.unwrap_or(value).trim().to_owned()
+        .filter_map(|part| {
+            let part = part.trim();
+            let (key, name) = match part.split_once(':') {
+                Some(("light", name)) => ("light", name),
+                Some(("dark", name)) => ("dark", name),
+                _ => return None,
+            };
+            Some((key, name.trim().to_owned()))
+        })
+        .collect();
+    if out.is_empty() {
+        out.push(("name", value.trim().to_owned()));
+    }
+    out
 }
 
 fn first_number(value: &str) -> Option<i64> {

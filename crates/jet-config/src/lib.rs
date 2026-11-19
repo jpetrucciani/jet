@@ -46,6 +46,8 @@ pub struct Config {
     pub status: Status,
     /// `[plumb.editor]`: text that does something when Ctrl+clicked.
     pub plumb: BTreeMap<String, plumb::Plumb>,
+    /// `[hosts.prod]`: how panes on a host matching its regex look.
+    pub hosts: BTreeMap<String, Host>,
     /// jetmux's settings, which jetmux reads (with its own file on top).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub jetmux: Option<Table>,
@@ -81,7 +83,7 @@ pub struct Quake {
     pub over_taskbar: bool,
     /// The profile its first tab opens; unset: `[shell]`'s.
     pub profile: Option<String>,
-    /// Windows: keep `jet quake` running, started at sign-in and by any jet
+    /// Windows and macOS: keep `jet quake` running, started at sign-in and by any jet
     /// window that finds it isn't.
     pub autostart: bool,
 }
@@ -133,6 +135,30 @@ pub struct Theme {
     /// A Ghostty theme file: a path, or a name looked up in the `themes`
     /// dir beside jet's or Ghostty's config.
     pub name: Option<String>,
+    /// In place of `name` while the system is in light mode, or dark.
+    pub light: Option<String>,
+    pub dark: Option<String>,
+}
+
+impl Theme {
+    /// The key whose theme is in effect in `appearance`: the one to
+    /// change for it.
+    pub fn key(&self, appearance: Appearance) -> &'static str {
+        match appearance {
+            Appearance::Light if self.light.is_some() => "light",
+            Appearance::Dark if self.dark.is_some() => "dark",
+            _ => "name",
+        }
+    }
+}
+
+/// The system's light or dark mode, which picks `[theme] light` or
+/// `dark`. Dark where the system doesn't say.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Appearance {
+    #[default]
+    Dark,
+    Light,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -315,6 +341,26 @@ pub struct TabBar {
     pub foreground: Option<Color>,
     pub active_background: Option<Color>,
     pub active_foreground: Option<Color>,
+    /// How a profile's `tab-color` shows.
+    pub color_style: TabColorStyle,
+}
+
+/// How a tab shows its profile's `tab-color`.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TabColorStyle {
+    /// The whole tab, dimmer when it isn't the active one.
+    #[default]
+    Fill,
+    /// A line along that edge of the tab.
+    Top,
+    Bottom,
+    Left,
+    Right,
+    /// A dot before the title.
+    Dot,
+    /// The title's text.
+    Text,
 }
 
 impl Default for TabBar {
@@ -327,6 +373,7 @@ impl Default for TabBar {
             foreground: None,
             active_background: None,
             active_foreground: None,
+            color_style: TabColorStyle::Fill,
         }
     }
 }
@@ -415,17 +462,40 @@ impl From<Icon> for String {
 
 /// A kind of tab to open by name: `new_tab:pwsh`, `new_split:right:pwsh`.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Profile {
     /// Unset: the default shell's.
     pub command: Option<Command>,
     /// Shown before its tabs' titles.
     pub icon: Option<Icon>,
+    /// Its panes' theme in place of `[theme]`'s, by name like that one.
+    /// Loading folds it into `colors`.
+    pub theme: Option<String>,
+    /// Its panes' colors, over `theme`'s and then `[colors]`.
+    pub colors: Colors,
+    /// Its tabs' color in the tab bar, shown per `color_style`.
+    pub tab_color: Option<Color>,
+    /// How `tab_color` shows; unset: `[tab-bar] color-style`.
+    pub color_style: Option<TabColorStyle>,
     /// Start here instead of where the focused shell is.
     pub cwd: Option<PathBuf>,
     /// Show a jetmux session instead of running `command`: its tabs
     /// become tabs here, its splits drawn as jet's.
     pub jetmux: Option<Jetmux>,
+}
+
+/// A look for panes whose host (the status's `{host}`: where the shell
+/// says it is, else the `ssh` in front, else this machine) matches.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct Host {
+    #[serde(rename = "match")]
+    pub pattern: plumb::Pattern,
+    /// As a profile's: over the pane's profile's look.
+    pub theme: Option<String>,
+    pub colors: Colors,
+    pub tab_color: Option<Color>,
+    pub color_style: Option<TabColorStyle>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -558,6 +628,22 @@ pub struct Colors {
     pub palette: BTreeMap<String, Color>,
 }
 
+impl Colors {
+    /// These, with `base`'s where these are unset.
+    pub fn over(&self, base: &Colors) -> Colors {
+        let mut palette = base.palette.clone();
+        palette.extend(self.palette.clone());
+        Colors {
+            foreground: self.foreground.or(base.foreground),
+            background: self.background.or(base.background),
+            cursor: self.cursor.or(base.cursor),
+            selection_background: self.selection_background.or(base.selection_background),
+            selection_foreground: self.selection_foreground.or(base.selection_foreground),
+            palette,
+        }
+    }
+}
+
 /// `"#rrggbb"`, `"rrggbb"` or `"#rgb"`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Color(pub Rgb);
@@ -578,7 +664,8 @@ impl<'de> Deserialize<'de> for Color {
     }
 }
 
-fn parse_color(text: &str) -> Option<Rgb> {
+/// `#rrggbb`, `rrggbb` or `#rgb`.
+pub fn parse_color(text: &str) -> Option<Rgb> {
     let hex = text.strip_prefix('#').unwrap_or(text);
     let digit = |i: usize| hex.get(i..=i).and_then(|d| u8::from_str_radix(d, 16).ok());
     let byte = |i: usize| {
@@ -627,6 +714,8 @@ pub struct Dirs {
     pub platform: Option<PathBuf>,
     /// Where Ghostty keeps its config and themes.
     pub ghostty: Vec<PathBuf>,
+    /// Which of `[theme] light` and `dark` to load.
+    pub appearance: Appearance,
 }
 
 impl Dirs {
@@ -656,6 +745,7 @@ impl Dirs {
             home,
             platform,
             ghostty,
+            appearance: Appearance::default(),
         }
     }
 
@@ -760,20 +850,24 @@ pub fn load(dirs: &Dirs) -> Result<Loaded, Error> {
 pub fn load_with_theme(dirs: &Dirs, name: &str) -> Result<Loaded, Error> {
     let main = dirs.candidates().into_iter().find(|p| p.is_file());
     let text = main.as_ref().map(|p| read(p)).transpose()?;
+    // Whichever key is in effect.
     let mut theme = Table::new();
-    theme.insert("name".into(), Value::String(name.to_owned()));
+    for key in ["name", "light", "dark"] {
+        theme.insert(key.into(), Value::String(name.to_owned()));
+    }
     let mut top = Table::new();
     top.insert("theme".into(), Value::Table(theme));
     let preview = Some((Path::new("theme preview"), top));
     resolve(main.as_deref().zip(text.as_deref()), preview, dirs)
 }
 
-/// Config `text` with its `[theme] name` set to `name`, the rest as it was;
-/// `None` when that can't be done by line (an inline `theme = {...}`).
-pub fn with_theme(text: &str, name: &str) -> Option<String> {
-    let line = format!("name = {}", Value::String(name.to_owned()));
+/// Config `text` with its `[theme]` `key` (name, light or dark) set to
+/// `name`, the rest as it was; `None` when that can't be done by line (an
+/// inline `theme = {...}`).
+pub fn with_theme(text: &str, key: &str, name: &str) -> Option<String> {
+    let line = format!("{key} = {}", Value::String(name.to_owned()));
     let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
-    let key = |l: &str| {
+    let key_of = |l: &str| {
         l.split('=')
             .next()
             .map(str::trim)
@@ -792,8 +886,8 @@ pub fn with_theme(text: &str, name: &str) -> Option<String> {
             }
             continue;
         }
-        let ours =
-            (table == "theme" && key(t) == "name") || (table.is_empty() && key(t) == "theme.name");
+        let ours = (table == "theme" && key_of(t) == key)
+            || (table.is_empty() && key_of(t) == format!("theme.{key}"));
         if ours && !done {
             let prefix = if table.is_empty() { "theme." } else { "" };
             out.push(format!("{prefix}{line}"));
@@ -816,7 +910,7 @@ pub fn with_theme(text: &str, name: &str) -> Option<String> {
     let table: Table = toml::from_str(&new).ok()?;
     let set = table
         .get("theme")
-        .and_then(|t| t.get("name"))
+        .and_then(|t| t.get(key))
         .and_then(Value::as_str);
     (set == Some(name)).then_some(new)
 }
@@ -906,8 +1000,37 @@ impl Config {
 
     /// What the terminal itself follows; unset colors keep jet's defaults.
     pub fn vt_settings(&self) -> VtSettings {
+        self.vt_settings_with(&self.colors)
+    }
+
+    /// For a pane of profile `name`: its colors over the config's.
+    pub fn profile_vt_settings(&self, name: Option<&str>) -> VtSettings {
+        self.pane_vt_settings(name, None)
+    }
+
+    /// For a pane of profile `profile` on a host `host` (a `[hosts]` name)
+    /// matched: the host's colors over the profile's over the config's.
+    pub fn pane_vt_settings(&self, profile: Option<&str>, host: Option<&str>) -> VtSettings {
+        let mut colors = self.colors.clone();
+        if let Some(profile) = profile.and_then(|name| self.profiles.get(name)) {
+            colors = profile.colors.over(&colors);
+        }
+        if let Some(host) = host.and_then(|name| self.hosts.get(name)) {
+            colors = host.colors.over(&colors);
+        }
+        self.vt_settings_with(&colors)
+    }
+
+    /// The first `[hosts]` rule (by name) whose regex matches `host`.
+    pub fn host_rule(&self, host: &str) -> Option<&str> {
+        self.hosts
+            .iter()
+            .find(|(_, rule)| rule.pattern.regex().is_some_and(|r| r.is_match(host)))
+            .map(|(name, _)| name.as_str())
+    }
+
+    fn vt_settings_with(&self, colors: &Colors) -> VtSettings {
         let default = VtSettings::default();
-        let colors = &self.colors;
         VtSettings {
             foreground: colors.foreground.map_or(default.foreground, |c| c.0),
             background: colors.background.map_or(default.background, |c| c.0),
@@ -983,41 +1106,30 @@ fn resolve(
     merge(&mut merged, table);
     merge(&mut merged, native);
 
-    let theme = merged
-        .get("theme")
-        .and_then(|t| t.get("name"))
-        .and_then(Value::as_str)
-        .map(str::to_owned);
+    let mode = match dirs.appearance {
+        Appearance::Light => "light",
+        Appearance::Dark => "dark",
+    };
+    let theme = merged.get("theme").and_then(|t| {
+        let name = t.get(mode).or_else(|| t.get("name"));
+        name.and_then(Value::as_str).map(str::to_owned)
+    });
     if let Some(name) = theme {
-        // A file of the user's wins over the built-in theme of that name.
-        let path = find_theme(&name, dirs);
-        let text = match &path {
-            Some(path) => read(path)?,
-            None => bundled_theme(&name)
-                .ok_or_else(|| {
-                    let searched: Vec<String> = dirs
-                        .theme_dirs()
-                        .iter()
-                        .map(|d| d.display().to_string())
-                        .collect();
-                    Error(format!(
-                        "theme {name:?} isn't built in or in {}",
-                        searched.join(", ")
-                    ))
-                })?
-                .to_owned(),
+        theme_under(&mut merged, &name, dirs, &mut loaded)?;
+    }
+    for looks in ["profiles", "hosts"] {
+        let Some(Value::Table(looks)) = merged.get_mut(looks) else {
+            continue;
         };
-        // Themes carry keys jet has no use for: quietly.
-        let (mut table, _) = ghostty::translate(&ghostty::parse(&text));
-        let mut colors = match table.remove("colors") {
-            Some(Value::Table(colors)) => colors,
-            _ => Table::new(),
-        };
-        if let Some(Value::Table(own)) = merged.remove("colors") {
-            merge(&mut colors, own);
+        for (_, look) in looks.iter_mut() {
+            let Some(look) = look.as_table_mut() else {
+                continue;
+            };
+            if let Some(name) = look.get("theme").and_then(Value::as_str) {
+                let name = name.to_owned();
+                theme_under(look, &name, dirs, &mut loaded)?;
+            }
         }
-        merged.insert("colors".into(), Value::Table(colors));
-        loaded.sources.extend(path);
     }
 
     let mut config: Config = Value::Table(merged)
@@ -1036,12 +1148,63 @@ fn resolve(
     Ok(loaded)
 }
 
+/// Theme `name`'s colors under `table`'s own `colors`. A file of the
+/// user's wins over the built-in theme of that name.
+fn theme_under(
+    table: &mut Table,
+    name: &str,
+    dirs: &Dirs,
+    loaded: &mut Loaded,
+) -> Result<(), Error> {
+    let path = find_theme(name, dirs);
+    let text = match &path {
+        Some(path) => read(path)?,
+        None => bundled_theme(name)
+            .ok_or_else(|| {
+                let searched: Vec<String> = dirs
+                    .theme_dirs()
+                    .iter()
+                    .map(|d| d.display().to_string())
+                    .collect();
+                Error(format!(
+                    "theme {name:?} isn't built in or in {}",
+                    searched.join(", ")
+                ))
+            })?
+            .to_owned(),
+    };
+    // Themes carry keys jet has no use for: quietly.
+    let (mut theme, _) = ghostty::translate(&ghostty::parse(&text));
+    let mut colors = match theme.remove("colors") {
+        Some(Value::Table(colors)) => colors,
+        _ => Table::new(),
+    };
+    if let Some(Value::Table(own)) = table.remove("colors") {
+        merge(&mut colors, own);
+    }
+    table.insert("colors".into(), Value::Table(colors));
+    if !path.as_ref().is_some_and(|p| loaded.sources.contains(p)) {
+        loaded.sources.extend(path);
+    }
+    Ok(())
+}
+
 fn check(config: &Config) -> Result<(), Error> {
-    let mut palette = config.colors.palette.keys();
-    if let Some(key) = palette.find(|k| k.parse::<u8>().is_err()) {
-        return Err(Error(format!(
-            "colors.palette: {key:?} is not an index 0-255"
-        )));
+    let profiles = config
+        .profiles
+        .iter()
+        .map(|(name, p)| (format!("profiles.{name}."), &p.colors));
+    let hosts = config
+        .hosts
+        .iter()
+        .map(|(name, h)| (format!("hosts.{name}."), &h.colors));
+    let own = profiles.chain(hosts);
+    for (at, colors) in std::iter::once((String::new(), &config.colors)).chain(own) {
+        if let Some(key) = colors.palette.keys().find(|k| k.parse::<u8>().is_err()) {
+            return Err(Error(format!(
+                "{at}colors.palette: {key:?} is not an index 0-255"
+            )));
+        }
     }
     if !(1.0..=200.0).contains(&config.font.size) {
         return Err(Error(format!(
@@ -1062,6 +1225,13 @@ fn check(config: &Config) -> Result<(), Error> {
     }
     for (name, rule) in &config.plumb {
         rule.check(name).map_err(Error)?;
+    }
+    if let Some(name) = config
+        .hosts
+        .iter()
+        .find_map(|(n, h)| h.pattern.regex().is_none().then_some(n))
+    {
+        return Err(Error(format!("hosts.{name}: needs a match regex")));
     }
     let quake = &config.quake;
     if keybinds::parse_chord(&quake.hotkey).is_none() {
@@ -1117,14 +1287,18 @@ fn check(config: &Config) -> Result<(), Error> {
     Ok(())
 }
 
-/// Ghostty's themes, each from its `[name]` line to the next.
-const THEMES: &str = include_str!("../themes.txt");
+/// Ghostty's themes, and jet's own: each from its `[name]` line to the
+/// next.
+const THEMES: [&str; 2] = [
+    include_str!("../themes.txt"),
+    include_str!("../jet-themes.txt"),
+];
 
 fn bundled_themes() -> impl Iterator<Item = (&'static str, &'static str)> {
-    THEMES
-        .split("\n[")
-        .skip(1)
-        .filter_map(|theme| theme.split_once("]\n"))
+    THEMES.into_iter().flat_map(|file| {
+        let themes = file.split("\n[").skip(1);
+        themes.filter_map(|theme| theme.split_once("]\n"))
+    })
 }
 
 /// The built-in theme `name`; any case, if no exact match.
@@ -1396,7 +1570,8 @@ mod tests {
         );
         assert_eq!(c.font.size, 14.0, "jet keys beat inline and imported ones");
         assert_eq!(c.window.padding, 6);
-        assert_eq!(c.theme.name.as_deref(), Some("Night"));
+        assert_eq!(c.theme.light.as_deref(), Some("Day"));
+        assert_eq!(c.theme.dark.as_deref(), Some("Night"));
         let vt = c.vt_settings();
         assert_eq!(
             vt.cursor_style,
@@ -1466,7 +1641,7 @@ mod tests {
 
     #[test]
     fn with_theme_edits_only_the_theme() {
-        let set = |text: &str| crate::with_theme(text, "Night");
+        let set = |text: &str| crate::with_theme(text, "name", "Night");
         let named = "[font]\nsize = 13\n\n[theme]\nname = \"Day\" # mine\n[colors]\n";
         assert_eq!(
             set(named).as_deref(),
@@ -1483,12 +1658,106 @@ mod tests {
             Some("[font]\r\nsize = 13\r\n\r\n[theme]\r\nname = \"Night\"\r\n")
         );
         assert_eq!(set("theme = { name = \"Day\" }\n"), None);
+        let paired = "[theme]\nname = \"Day\"\nlight = \"Day\"\n";
+        assert_eq!(
+            crate::with_theme(paired, "light", "Night").as_deref(),
+            Some("[theme]\nname = \"Day\"\nlight = \"Night\"\n")
+        );
+    }
+
+    #[test]
+    fn light_mode_picks_its_theme() -> Result<(), crate::Error> {
+        let text = "[theme]\nname = \"poimandres\"\nlight = \"Nu Disco Light\"\n";
+        let background = |appearance| -> Result<_, crate::Error> {
+            let dirs = Dirs {
+                appearance,
+                ..Dirs::default()
+            };
+            Ok(Config::parse(text, &dirs)?.config.vt_settings().background)
+        };
+        let white = Rgb {
+            r: 0xff,
+            g: 0xff,
+            b: 0xff,
+        };
+        assert_eq!(background(crate::Appearance::Light)?, white);
+        assert_ne!(background(crate::Appearance::Dark)?, white, "no dark: name");
+        Ok(())
+    }
+
+    #[test]
+    fn hosts_restyle_their_panes() -> Result<(), String> {
+        let loaded = parse(
+            "[profiles.box]\ntab-color = \"#00ff00\"\ncolors.cursor = \"#00ff00\"\n\
+             [hosts.prod]\nmatch = '^prod-'\ntheme = \"grapebox\"\ntab-color = \"#ff0000\"\n",
+        )?;
+        let c = &loaded.config;
+        assert_eq!(c.host_rule("prod-db1"), Some("prod"));
+        assert_eq!(c.host_rule("dev-prod-1"), None);
+        let prod = c.pane_vt_settings(Some("box"), Some("prod"));
+        let rgb = |r, g, b| Rgb { r, g, b };
+        assert_eq!(prod.background, rgb(0x43, 0x33, 0x53), "the host's theme");
+        assert_eq!(
+            prod.cursor,
+            Some(rgb(0xb5, 0x94, 0xd6)),
+            "over the profile's colors"
+        );
+        let err = parse("[hosts.prod]\ntheme = \"grapebox\"\n").err();
+        assert!(err.is_some_and(|e| e.contains("hosts.prod: needs a match regex")));
+        Ok(())
     }
 
     #[test]
     fn missing_theme_is_an_error() {
         let err = parse("[theme]\nname = \"Nope\"\n").err();
         assert!(err.is_some_and(|e| e.contains("theme \"Nope\" isn't built in")));
+    }
+
+    #[test]
+    fn profiles_take_their_own_theme() -> Result<(), String> {
+        let loaded = parse(
+            "[theme]\nname = \"poimandres\"\n[colors]\ncursor = \"#ff0000\"\n\
+             [profiles.prod]\ntheme = \"grapebox\"\ncolors.foreground = \"#00ff00\"\n",
+        )?;
+        let c = &loaded.config;
+        let prod = c.profile_vt_settings(Some("prod"));
+        // The profile's theme, its own colors over that, the rest from [colors].
+        assert_eq!(
+            prod.background,
+            Rgb {
+                r: 0x43,
+                g: 0x33,
+                b: 0x53
+            }
+        );
+        assert_eq!(
+            prod.foreground,
+            Rgb {
+                r: 0,
+                g: 0xff,
+                b: 0
+            }
+        );
+        assert_eq!(
+            prod.cursor,
+            Some(Rgb {
+                r: 0xb5,
+                g: 0x94,
+                b: 0xd6
+            })
+        );
+        // Other panes keep [theme]'s.
+        assert_eq!(c.profile_vt_settings(None), c.vt_settings());
+        assert_eq!(
+            c.vt_settings().background,
+            Rgb {
+                r: 0x1a,
+                g: 0x1e,
+                b: 0x28
+            }
+        );
+        assert!(parse("[profiles.prod]\ntheme = \"no such theme\"\n").is_err());
+        Ok(())
     }
 
     #[test]
@@ -1505,6 +1774,26 @@ mod tests {
         );
         // Names a file couldn't have on Windows work too.
         assert!(parse("[theme]\nname = \"Paper Crane: Midnight Ink\"\n").is_ok());
+        // And jet's own.
+        let grape = parse("[theme]\nname = \"grapebox\"\n")?;
+        let background = grape.config.colors.background.map(|c| c.0);
+        assert_eq!(
+            background,
+            Some(Rgb {
+                r: 0x43,
+                g: 0x33,
+                b: 0x53
+            })
+        );
+        for name in [
+            "Dank Neon",
+            "Dank Neon Light",
+            "Nu Disco Dark",
+            "Nu Disco Light",
+        ] {
+            let theme = parse(&format!("[theme]\nname = \"{name}\"\n"))?;
+            assert!(theme.config.colors.background.is_some(), "{name}");
+        }
         assert!(Dirs::default().themes().len() > 900);
         Ok(())
     }

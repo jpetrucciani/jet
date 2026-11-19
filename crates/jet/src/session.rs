@@ -16,6 +16,9 @@ pub struct Session {
 pub struct Tab {
     /// Only one the user gave it.
     pub title: Option<String>,
+    /// From `set_tab_color`, as `[r, g, b]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<[u8; 3]>,
     pub root: Node,
     /// Which pane had the keyboard, in [`Node::leaves`] order.
     pub focused: usize,
@@ -118,6 +121,7 @@ mod tests {
         let here = std::env::current_dir().ok();
         let session = Session {
             tabs: vec![Tab {
+                color: Some([1, 2, 3]),
                 title: Some("logs".into()),
                 root: Node::Split {
                     horizontal: true,

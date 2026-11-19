@@ -58,6 +58,12 @@ pub enum Place {
 #[serde(try_from = "String", into = "String")]
 pub struct Pattern(Option<Regex>);
 
+impl Pattern {
+    pub fn regex(&self) -> Option<&Regex> {
+        self.0.as_ref()
+    }
+}
+
 impl PartialEq for Pattern {
     fn eq(&self, other: &Self) -> bool {
         String::from(self.clone()) == String::from(other.clone())

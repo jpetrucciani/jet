@@ -2,7 +2,7 @@
 //! (`ctrl+shift+t`, `new_split:right`) so a Ghostty `keybind` line means
 //! the same thing in jet.
 
-use jet_core::{Key, Mods};
+use jet_core::{Key, Mods, Rgb};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction {
@@ -10,6 +10,16 @@ pub enum Direction {
     Right,
     Up,
     Down,
+}
+
+/// What `set_tab_color` does to the tab's color.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabColor {
+    /// Choose from a palette.
+    Pick,
+    Set(Rgb),
+    /// Back to what the config gives it.
+    Clear,
 }
 
 /// Which split `goto_split` moves to.
@@ -62,6 +72,8 @@ pub enum Action {
     EqualizeSplits,
     /// Name the tab (an empty name gives it back to the shell).
     RenameTab,
+    /// Color the tab, over what its profile or host gives it.
+    SetTabColor(TabColor),
     /// Move the tab `n` places right (negative, left), wrapping around.
     MoveTab(isize),
     ReloadConfig,
@@ -76,6 +88,9 @@ pub enum Action {
     CopyVersion,
     /// The config file in an editor, made first if there's none.
     OpenConfig,
+    /// The quake window back where `[quake]` puts it, after being moved
+    /// or resized.
+    ResetQuake,
     /// A palette of the themes found, each previewed while selected.
     ChooseTheme,
     /// A palette of the profiles to open a tab with.
@@ -499,6 +514,11 @@ fn parse_action(text: &str) -> Option<Action> {
         }
         ("equalize_splits", None) => Action::EqualizeSplits,
         ("rename_tab", None) => Action::RenameTab,
+        ("set_tab_color", None) => Action::SetTabColor(TabColor::Pick),
+        ("set_tab_color", Some("none")) => Action::SetTabColor(TabColor::Clear),
+        ("set_tab_color", Some(color)) => {
+            Action::SetTabColor(TabColor::Set(crate::parse_color(color)?))
+        }
         ("move_tab", Some(n)) => Action::MoveTab(n.parse().ok().filter(|&n| n != 0)?),
         ("reload_config", None) => Action::ReloadConfig,
         ("ignore", None) => Action::Ignore,
@@ -506,6 +526,7 @@ fn parse_action(text: &str) -> Option<Action> {
         ("detach", None) => Action::Detach,
         ("copy_version", None) => Action::CopyVersion,
         ("open_config", None) => Action::OpenConfig,
+        ("reset_quake", None) => Action::ResetQuake,
         ("choose_theme", None) => Action::ChooseTheme,
         ("new_tab_menu", None) => Action::NewTabMenu,
         _ => return None,
@@ -573,6 +594,20 @@ mod tests {
             Some("a:b\x1b[A\u{e9}".into())
         );
         assert_eq!(text(r"text:\q"), None);
+    }
+
+    #[test]
+    fn set_tab_color_takes_a_color_or_none() {
+        use crate::keybinds::{Action, TabColor, parse_action};
+        let red = jet_core::Rgb { r: 255, g: 0, b: 0 };
+        let set = |c| Some(Action::SetTabColor(c));
+        assert_eq!(parse_action("set_tab_color"), set(TabColor::Pick));
+        assert_eq!(
+            parse_action("set_tab_color:#ff0000"),
+            set(TabColor::Set(red))
+        );
+        assert_eq!(parse_action("set_tab_color:none"), set(TabColor::Clear));
+        assert_eq!(parse_action("set_tab_color:reddish"), None);
     }
 
     #[test]

@@ -45,6 +45,8 @@ pub enum Request {
     SetTitle(SetLabel),
     /// Override a tab's icon; `None` restores its profile's.
     SetIcon(SetLabel),
+    /// Color a tab (`#rrggbb`); `None` restores what the config gives it.
+    SetColor(SetLabel),
     /// A user variable on a pane, as OSC 1337 SetUserVar sets.
     SetVar(SetVar),
     /// The share of its split a pane gets.

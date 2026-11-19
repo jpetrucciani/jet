@@ -1,0 +1,129 @@
+# Themes jet adds to Ghostty's (themes.txt), in the same format: each
+# starts at its [name]. Kept by hand; THIRD-PARTY-NOTICES carries the
+# licenses.
+
+# Grapebox, by Jade Fisher (MIT): converted from its Zed theme,
+# https://github.com/fisherrjd/Grapebox at c4d5005. Zed's translucent
+# selection is flattened over the background.
+[Grapebox]
+palette = 0=#433353
+palette = 1=#f2a0a0
+palette = 2=#98971a
+palette = 3=#d79921
+palette = 4=#458588
+palette = 5=#9673b9
+palette = 6=#689d6a
+palette = 7=#bfb3ce
+palette = 8=#8676a0
+palette = 9=#f2a0a0
+palette = 10=#b8bb26
+palette = 11=#fabd2d
+palette = 12=#83a598
+palette = 13=#b594d6
+palette = 14=#8ec07c
+palette = 15=#fbf1c7
+background = #433353
+foreground = #fbf1c7
+cursor-color = #b594d6
+cursor-text = #433353
+selection-background = #604b74
+
+# Dank Neon, by Dank Neon (MIT): converted from its VS Code themes,
+# https://github.com/DankNeon/vscode at 82907ae. They set no terminal
+# colors, so the ANSI ones are its syntax palette; bright shares the hue.
+[Dank Neon]
+palette = 0=#2a2d46
+palette = 1=#ff476e
+palette = 2=#39ffba
+palette = 3=#ffee7a
+palette = 4=#94bfff
+palette = 5=#f1b3f1
+palette = 6=#01f7f7
+palette = 7=#a5abca
+palette = 8=#656fa4
+palette = 9=#ff476e
+palette = 10=#39ffba
+palette = 11=#ffca7a
+palette = 12=#94bfff
+palette = 13=#f1b3f1
+palette = 14=#01f7f7
+palette = 15=#eff0f6
+background = #191b2a
+foreground = #eff0f6
+cursor-color = #eff0f6
+cursor-text = #191b2a
+selection-background = #656fa4
+
+[Dank Neon Light]
+palette = 0=#191b2a
+palette = 1=#d21570
+palette = 2=#207b5f
+palette = 3=#fd9c33
+palette = 4=#0063f5
+palette = 5=#bb22bb
+palette = 6=#007a7a
+palette = 7=#a5abca
+palette = 8=#4f5987
+palette = 9=#d21570
+palette = 10=#207b5f
+palette = 11=#fd9c33
+palette = 12=#0063f5
+palette = 13=#9470ff
+palette = 14=#007a7a
+palette = 15=#e5e7f0
+background = #eff0f6
+foreground = #191b2a
+cursor-color = #191b2a
+cursor-text = #eff0f6
+selection-background = #656fa4
+
+# Nu Disco, by Danny Banks (MIT): converted from its VS Code theme tokens,
+# https://github.com/dbanksdesign/nu-disco-vscode-theme at 6e43950.
+# Translucent colors are flattened over the background and the cursor is
+# its opaque pink. Dark's black and white are swapped back from the
+# theme's (which made white text near-black), with grey for bright black.
+[Nu Disco Dark]
+palette = 0=#180d2a
+palette = 1=#ffb8b8
+palette = 2=#aeecc3
+palette = 3=#fff9bb
+palette = 4=#c3e7f9
+palette = 5=#ffcfe3
+palette = 6=#c4fffd
+palette = 7=#bebbc3
+palette = 8=#4e465b
+palette = 9=#ff7878
+palette = 10=#67e591
+palette = 11=#fff373
+palette = 12=#6bb5ff
+palette = 13=#ff82b4
+palette = 14=#52e7e1
+palette = 15=#efeef0
+background = #0c001f
+foreground = #efeef0
+cursor-color = #ff82b4
+cursor-text = #0c001f
+selection-background = #285c6d
+
+[Nu Disco Light]
+palette = 0=#4d445b
+palette = 1=#e62424
+palette = 2=#06b741
+palette = 3=#eeda00
+palette = 4=#0081c2
+palette = 5=#e62472
+palette = 6=#0caba6
+palette = 7=#f8f7f8
+palette = 8=#0c001f
+palette = 9=#bd0000
+palette = 10=#009e35
+palette = 11=#d0bf00
+palette = 12=#005c8a
+palette = 13=#b6034b
+palette = 14=#00837f
+palette = 15=#ffffff
+background = #ffffff
+foreground = #0c001f
+cursor-color = #e62472
+cursor-text = #ffffff
+selection-background = #9edddb
