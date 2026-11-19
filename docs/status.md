@@ -80,50 +80,68 @@ ESC ] 1337 ; SetUserVar=NAME=BASE64(VALUE) BEL
 
 It's the convention WezTerm and iTerm2 use, so integrations written for them work unchanged. An empty value unsets the variable, which hides its segments. Variables pass through `ssh`, so a remote shell can set them too, and so can `jet-cli set-var NAME VALUE` from a script.
 
+A pane keeps its variables until they're set again, so send every one on every prompt, empty ones included. That's what clears the values a remote shell set once `ssh` exits.
+
 Also send OSC 7 with the host. Then `{host}`, `{cwd}` and `{dir}` are right on remote boxes, and new tabs open in the local shell's directory.
 
 ### bash
 
-The `__wezterm_title` function in `~/cfg/hosts/constants.nix` packs everything into the title with `|` separators. With jet, send each piece as its own variable instead. The title stays free for the program's own, and each piece gets its own segment and color:
+[`jet-status.bash`](jet-status.bash) sends all of this before each prompt:
+
+| Variable | Value                                                                                    |
+| -------- | ---------------------------------------------------------------------------------------- |
+| `git`    | The branch, or the short commit when detached                                            |
+| `gitop`  | An operation in progress: `rebase 2/5`, `merge`, `cherry-pick`, `revert`, `bisect`, `am` |
+| `k8s`    | The kubeconfig's current context, with `:namespace` unless it's `default`                |
+| `nix`    | The `nix-shell` or `nix develop` shell's name                                            |
+| `venv`   | The Python virtualenv (its project, for a `.venv`)                                       |
+| `jobs`   | How many background jobs, when there are any                                             |
+| `took`   | How long the last command ran, when 2 seconds or more                                    |
+| `rc`     | The last command's exit status when it failed (`130 INT`)                                |
+
+It also sends OSC 7, and inside tmux it wraps everything so it passes through (needs `set -g allow-passthrough on`).
+
+It never starts a process, since it runs before every prompt: git's `HEAD` and the kubeconfig are read by bash itself, and base64 is done in bash too. That's about 0.2 ms a prompt, where calling `kubectl config current-context` alone takes 50. It needs bash 4.4 or newer, and does nothing on older ones (macOS's `/bin/bash`).
+
+Copy it next to your `~/.bashrc`, on the machines you ssh into too, and hook it in:
 
 ```bash
-__jet_var() { printf '\e]1337;SetUserVar=%s=%s\a' "$1" "$(printf %s "$2" | base64 | tr -d '\n')"; }
-
-__jet_status() {
-  local last_rc="$1" git_branch="" venv="" k8s=""
-  if [ -f .git/HEAD ]; then
-    git_branch=$(sed 's|ref: refs/heads/||' .git/HEAD 2>/dev/null)
-  elif [ -d .git ]; then
-    git_branch=$(git rev-parse --short HEAD 2>/dev/null)
-  fi
-  [ -n "$VIRTUAL_ENV" ] && venv=$(basename "$VIRTUAL_ENV")
-  if [ -n "$KUBECONFIG" ] && command -v kubectl &>/dev/null; then
-    k8s=$(kubectl config current-context 2>/dev/null)
-  fi
-  [ "$last_rc" = "0" ] && last_rc=""
-
-  # where we are, host included: {host}, {cwd}, {dir}
-  printf '\e]7;file://%s%s\a' "${HOSTNAME%%.*}" "$PWD"
-  __jet_var git "$git_branch"
-  __jet_var venv "$venv"
-  __jet_var k8s "$k8s"
-  __jet_var rc "$last_rc"
-}
+source ~/.jet-status.bash
+PROMPT_COMMAND="__jet_status${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
 ```
 
-Hook it the same way as `__wezterm_title`: through `starship_precmd_user_func`, or at the front of `PROMPT_COMMAND` so `$?` is intact (call it as `__jet_status $?`). Both functions can run side by side while you still use WezTerm.
+It goes first so it sees the last command's `$?`. With starship, use its hook instead, after `eval "$(starship init bash)"`; the timing then comes from starship's own timer:
 
-Then use the variables as segments:
+```bash
+starship_precmd_user_func=__jet_status
+```
+
+The values also stay in the `JET_STATUS` array, for anything else in your prompt to use.
+
+Then show the ones you want:
 
 ```toml
 [[status.segments]]
 text = " {var.git}"
 
 [[status.segments]]
-text = "🐍 {var.venv}"
+text = "{var.gitop}"
+background = "#d0679d"
 
 [[status.segments]]
 text = "⎈ {var.k8s}"
+
+[[status.segments]]
+text = "❄ {var.nix}"
+
+[[status.segments]]
+text = "🐍 {var.venv}"
+
+[[status.segments]]
+text = "⚙ {var.jobs}"
+
+[[status.segments]]
+text = "⏱ {var.took}"
 
 [[status.segments]]
 text = "✘ {var.rc}" # only after a failed command
@@ -132,20 +150,51 @@ background = "#d0679d"
 
 ### PowerShell
 
-```powershell
-function Set-JetVar($name, $value) {
-  $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$value))
-  Write-Host -NoNewline "$([char]27)]1337;SetUserVar=$name=$b64$([char]7)"
-}
+PowerShell's prompt runs in the same process, so a status costs little here, and the same rule applies: no `git` or `kubectl`.
 
+```powershell
 function prompt {
   $ok = $?
-  # PowerShell's cd doesn't move the process, so report where we are
-  Write-Host -NoNewline "$([char]27)]9;9;$($PWD.ProviderPath)$([char]7)"
-  Set-JetVar rc $(if ($ok) { "" } else { "failed" })
+  $code = $global:LASTEXITCODE
+  $vars = [ordered]@{ git = ''; venv = ''; took = ''; rc = '' }
+
+  # the branch, from .git/HEAD in this directory or above
+  for ($d = $PWD.ProviderPath; $d; $d = Split-Path $d) {
+    $git = Join-Path $d .git
+    if (Test-Path $git -PathType Leaf) { # a worktree: "gitdir: path"
+      $git = (Get-Content $git -TotalCount 1) -replace '^gitdir: '
+      if (-not [IO.Path]::IsPathRooted($git)) { $git = Join-Path $d $git }
+    }
+    if (Test-Path (Join-Path $git HEAD)) {
+      $head = Get-Content (Join-Path $git HEAD) -TotalCount 1
+      $vars.git = if ($head -like 'ref: refs/heads/*') { $head.Substring(16) } else { $head.Substring(0, 7) }
+      break
+    }
+  }
+  if ($env:VIRTUAL_ENV) { $vars.venv = Split-Path $env:VIRTUAL_ENV -Leaf }
+  $last = Get-History -Count 1
+  if ($last) {
+    $s = [int]($last.EndExecutionTime - $last.StartExecutionTime).TotalSeconds
+    if ($s -ge 3600) { $vars.took = '{0}h{1}m' -f [int][Math]::Floor($s / 3600), [int][Math]::Floor($s % 3600 / 60) }
+    elseif ($s -ge 60) { $vars.took = '{0}m{1}s' -f [int][Math]::Floor($s / 60), ($s % 60) }
+    elseif ($s -ge 2) { $vars.took = "${s}s" }
+  }
+  if (-not $ok) { $vars.rc = if ($code) { "$code" } else { 'failed' } }
+
+  # where we are (PowerShell's cd doesn't move the process), then each
+  # variable, empty ones too so they clear; one write for all of it
+  $e = [char]27
+  $out = "$e]9;9;$($PWD.ProviderPath)$e\"
+  foreach ($k in $vars.Keys) {
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($vars[$k]))
+    $out += "$e]1337;SetUserVar=$k=$b64$([char]7)"
+  }
+  [Console]::Write($out)
   "PS $PWD> "
 }
 ```
+
+With a prompt module (oh-my-posh, starship), put everything above the last line in a function and call it first thing in your prompt instead.
 
 ### From scripts
 
