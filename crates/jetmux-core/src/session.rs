@@ -1351,6 +1351,11 @@ mod tests {
         assert!(
             state.contains(&location) && state.contains(&PaneEvent::Progress(Progress::Normal(42)))
         );
+        // A client attaching later still gets the shell's variables.
+        assert!(state.contains(&PaneEvent::Var {
+            name: "k".into(),
+            value: "v".into()
+        }));
     }
 
     #[test]

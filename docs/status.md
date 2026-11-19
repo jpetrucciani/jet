@@ -80,7 +80,7 @@ ESC ] 1337 ; SetUserVar=NAME=BASE64(VALUE) BEL
 
 It's the convention WezTerm and iTerm2 use, so integrations written for them work unchanged. An empty value unsets the variable, which hides its segments. Variables pass through `ssh`, so a remote shell can set them too, and so can `jet-cli set-var NAME VALUE` from a script.
 
-A pane keeps its variables until they're set again, so send every one on every prompt, empty ones included. That's what clears the values a remote shell set once `ssh` exits.
+A pane keeps its variables until they're set again, so send every one on every prompt, empty ones included. jet also drops them when `ssh` starts or exits in the focused pane, but a pane in the background keeps them.
 
 Also send OSC 7 with the host. Then `{host}`, `{cwd}` and `{dir}` are right on remote boxes, and new tabs open in the local shell's directory.
 

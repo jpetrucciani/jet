@@ -1,5 +1,6 @@
 //! A pane: one PTY, the child process on its slave side, and its terminal.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
@@ -64,6 +65,7 @@ pub struct Pane {
     /// later.
     progress: Progress,
     context: Option<Context>,
+    vars: BTreeMap<String, String>,
     /// Where procfs last said the program in front is, as reported, for
     /// shells that don't send OSC 7.
     polled: Option<Option<Location>>,
@@ -184,6 +186,7 @@ impl Pane {
             reports: Vec::new(),
             progress: Progress::Hidden,
             context: None,
+            vars: BTreeMap::new(),
             polled: None,
             pointer: "",
             clipboard: None,
@@ -218,6 +221,7 @@ impl Pane {
             reports: Vec::new(),
             progress: Progress::Hidden,
             context: None,
+            vars: BTreeMap::new(),
             polled: None,
             pointer: "",
             clipboard: None,
@@ -308,6 +312,11 @@ impl Pane {
             self.reports.push(PaneEvent::Progress(progress));
         }
         for (name, value) in effects.vars {
+            if value.is_empty() {
+                self.vars.remove(&name);
+            } else {
+                self.vars.insert(name.clone(), value.clone());
+            }
             self.reports.push(PaneEvent::Var { name, value });
         }
         if let Some(context) = effects.context {
@@ -569,6 +578,10 @@ impl Pane {
         ];
         let location = self.location().flatten();
         out.extend(location.map(|l| PaneEvent::Location(Some(l))));
+        out.extend(self.vars.iter().map(|(name, value)| PaneEvent::Var {
+            name: name.clone(),
+            value: value.clone(),
+        }));
         out
     }
 

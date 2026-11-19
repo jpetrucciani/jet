@@ -77,50 +77,139 @@ impl Colors {
     }
 }
 
-/// A one-line text field, edited at its end.
+/// A one-line text field with a cursor.
 #[derive(Default)]
-struct Field(String);
+struct Field {
+    text: String,
+    /// The cursor's byte offset, on a char boundary.
+    at: usize,
+}
+
+/// Where words break, for word moves and deletes.
+fn separator(c: char) -> bool {
+    c.is_whitespace() || "/\\.-_:".contains(c)
+}
 
 impl Field {
-    /// Apply an editing key; whether the text changed, `None` for a key
-    /// that isn't one.
+    /// `text`, with the cursor at its end.
+    fn new(text: &str) -> Self {
+        Self {
+            text: text.to_owned(),
+            at: text.len(),
+        }
+    }
+
+    fn before(&self) -> &str {
+        self.text.get(..self.at).unwrap_or_default()
+    }
+
+    fn after(&self) -> &str {
+        self.text.get(self.at..).unwrap_or_default()
+    }
+
+    fn char_left(&self) -> usize {
+        self.before()
+            .char_indices()
+            .next_back()
+            .map_or(0, |(i, _)| i)
+    }
+
+    fn char_right(&self) -> usize {
+        self.at + self.after().chars().next().map_or(0, char::len_utf8)
+    }
+
+    /// The start of the word before the cursor, past any separators.
+    fn word_left(&self) -> usize {
+        let kept = self.before().trim_end_matches(separator);
+        kept.char_indices()
+            .rev()
+            .find(|&(_, c)| separator(c))
+            .map_or(0, |(i, c)| i + c.len_utf8())
+    }
+
+    /// The end of the word after the cursor, past any separators.
+    fn word_right(&self) -> usize {
+        let after = self.after();
+        let rest = after.trim_start_matches(separator);
+        let word = rest.find(separator).unwrap_or(rest.len());
+        self.at + (after.len() - rest.len()) + word
+    }
+
+    /// Remove the text between the cursor and `to`; whether there was any.
+    fn delete_to(&mut self, to: usize) -> bool {
+        let range = self.at.min(to)..self.at.max(to);
+        if range.is_empty() {
+            return false;
+        }
+        self.at = range.start;
+        self.text.replace_range(range, "");
+        true
+    }
+
+    fn move_to(&mut self, to: usize) -> bool {
+        self.at = to;
+        false
+    }
+
+    fn insert(&mut self, text: &str) -> bool {
+        let text: String = text.chars().filter(|c| !c.is_control()).collect();
+        self.text.insert_str(self.at, &text);
+        self.at += text.len();
+        !text.is_empty()
+    }
+
+    /// Apply an editing key; whether the text changed (else the cursor
+    /// may have moved), `None` for a key that isn't one. Ctrl or Alt makes
+    /// a move or delete a word's; Cmd on macOS, the line's.
     fn edit(&mut self, input: &KeyInput) -> Option<bool> {
         let mods = input.mods;
         let word = mods.intersects(Mods::CTRL | Mods::ALT);
-        match input.key {
-            Key::Backspace if word => {
-                let kept = self.0.trim_end();
-                let cut = kept
-                    .rfind(|c: char| c.is_whitespace() || "/\\.-_:".contains(c))
-                    .map_or(0, |i| i + 1);
-                let changed = cut != self.0.len();
-                self.0.truncate(cut);
-                Some(changed)
-            }
-            Key::Backspace => Some(self.0.pop().is_some()),
-            Key::U if mods.contains(Mods::CTRL) => {
-                let changed = !self.0.is_empty();
-                self.0.clear();
-                Some(changed)
-            }
+        let line = mods.contains(Mods::SUPER);
+        // not Ctrl+Alt, which is AltGr typing on some layouts
+        let ctrl = mods.contains(Mods::CTRL) && !mods.contains(Mods::ALT);
+        let end = self.text.len();
+        Some(match input.key {
+            Key::Backspace if line => self.delete_to(0),
+            Key::Backspace if word => self.delete_to(self.word_left()),
+            Key::Backspace => self.delete_to(self.char_left()),
+            Key::Delete if line => self.delete_to(end),
+            Key::Delete if word => self.delete_to(self.word_right()),
+            Key::Delete => self.delete_to(self.char_right()),
+            Key::ArrowLeft if line => self.move_to(0),
+            Key::ArrowLeft if word => self.move_to(self.word_left()),
+            Key::ArrowLeft => self.move_to(self.char_left()),
+            Key::ArrowRight if line => self.move_to(end),
+            Key::ArrowRight if word => self.move_to(self.word_right()),
+            Key::ArrowRight => self.move_to(self.char_right()),
+            Key::Home => self.move_to(0),
+            Key::End => self.move_to(end),
+            // as in readline
+            Key::A if ctrl => self.move_to(0),
+            Key::E if ctrl => self.move_to(end),
+            Key::U if ctrl => self.delete_to(0),
+            Key::K if ctrl => self.delete_to(end),
             _ => {
                 let text = input.text.as_deref()?;
                 if mods.intersects(Mods::CTRL | Mods::ALT | Mods::SUPER) {
                     return None;
                 }
-                let text: String = text.chars().filter(|c| !c.is_control()).collect();
-                self.0.push_str(&text);
-                Some(!text.is_empty())
+                self.insert(text)
             }
-        }
+        })
     }
 
     /// Typed text pasted in: its first line.
     fn paste(&mut self, text: &str) -> bool {
-        let line = text.lines().next().unwrap_or_default();
-        let line: String = line.chars().filter(|c| !c.is_control()).collect();
-        self.0.push_str(&line);
-        !line.is_empty()
+        self.insert(text.lines().next().unwrap_or_default())
+    }
+
+    /// What of the text shows in `cells`, the cursor always among it, and
+    /// the cursor's cell in that.
+    fn view(&self, cells: usize) -> (&str, usize) {
+        let before = tail(self.before(), cells.saturating_sub(1));
+        let start = self.at - before.len();
+        let shown = self.text.get(start..).unwrap_or_default();
+        (shown, Line::text_width(before))
     }
 }
 
@@ -142,7 +231,7 @@ impl Find {
     }
 
     pub fn query(&self) -> &str {
-        &self.query.0
+        &self.query.text
     }
 
     pub fn key(&mut self, input: &KeyInput) -> Outcome {
@@ -177,7 +266,7 @@ impl Find {
         let cols = usize::from(snapshot.cols);
         let width = cols.min(FIND_WIDTH);
         let count = match &snapshot.search {
-            _ if self.query.0.is_empty() => String::new(),
+            _ if self.query.text.is_empty() => String::new(),
             None => "…".to_owned(),
             Some(Matches { invalid: true, .. }) => "bad regex".to_owned(),
             Some(Matches { total: 0, .. }) => "no matches".to_owned(),
@@ -191,7 +280,7 @@ impl Find {
         let count_w = Line::text_width(&count) + 1;
         let field_w = width.saturating_sub(Line::text_width(label) + count_w);
         // The query's end shows when it's longer than the field.
-        let query = tail(&self.query.0, field_w.saturating_sub(1));
+        let (query, at) = self.query.view(field_w);
         let mut line = Line::default();
         line.push_text(label, Line::text_width(label), colors.cell(true, true));
         line.push_text(query, field_w, colors.cell(false, false));
@@ -201,7 +290,7 @@ impl Find {
         if let Some(top) = snapshot.lines.first_mut() {
             *top = Arc::new(top.with_overlay(x, &line));
         }
-        let cursor = x + Line::text_width(label) + Line::text_width(query);
+        let cursor = x + Line::text_width(label) + at;
         snapshot.cursor = typing.then(|| Cursor {
             x: u16::try_from(cursor.min(cols.saturating_sub(1))).unwrap_or(0),
             y: 0,
@@ -222,7 +311,7 @@ impl Rename {
     pub fn new(tab: u64, name: &str) -> Self {
         Self {
             tab,
-            name: Field(name.to_owned()),
+            name: Field::new(name),
         }
     }
 
@@ -232,7 +321,7 @@ impl Rename {
         }
         match input.key {
             Key::Escape => Outcome::Close,
-            Key::Enter => Outcome::Rename(self.name.0.trim().to_owned()),
+            Key::Enter => Outcome::Rename(self.name.text.trim().to_owned()),
             _ => edited(self.name.edit(input)),
         }
     }
@@ -247,7 +336,7 @@ impl Rename {
         let width = cols.min(FIND_WIDTH);
         let label = " tab name ";
         let field_w = width.saturating_sub(Line::text_width(label) + 1);
-        let name = tail(&self.name.0, field_w.saturating_sub(1));
+        let (name, at) = self.name.view(field_w);
         let mut line = Line::default();
         line.push_text(label, Line::text_width(label), colors.cell(true, true));
         line.push_text(name, field_w, colors.cell(false, false));
@@ -256,7 +345,7 @@ impl Rename {
         if let Some(top) = snapshot.lines.first_mut() {
             *top = Arc::new(top.with_overlay(x, &line));
         }
-        let cursor = x + Line::text_width(label) + Line::text_width(name);
+        let cursor = x + Line::text_width(label) + at;
         snapshot.cursor = typing.then(|| Cursor {
             x: u16::try_from(cursor.min(cols.saturating_sub(1))).unwrap_or(0),
             y: 0,
@@ -389,7 +478,7 @@ impl Palette {
     }
 
     fn filter(&mut self) {
-        let query = self.query.0.as_str();
+        let query = self.query.text.as_str();
         let mut scored: Vec<(i32, usize)> = self
             .commands
             .iter()
@@ -440,7 +529,7 @@ impl Palette {
         let mut input = Line::default();
         input.push_text(prompt, Line::text_width(prompt), colors.cell(false, true));
         let field = f.width.saturating_sub(Line::text_width(prompt));
-        let query = tail(&self.query.0, field.saturating_sub(1));
+        let (query, at) = self.query.view(field);
         input.push_text(query, field, colors.cell(false, false));
         rows.push(input);
         let first = self.scroll(f.items);
@@ -468,7 +557,7 @@ impl Palette {
                 *under = Arc::new(under.with_overlay(f.x, line));
             }
         }
-        let x = f.x + Line::text_width(prompt) + Line::text_width(query);
+        let x = f.x + Line::text_width(prompt) + at;
         snapshot.cursor = typing.then(|| Cursor {
             x: u16::try_from(x).unwrap_or(0),
             y: u16::try_from(f.y).unwrap_or(0),
@@ -564,7 +653,19 @@ pub fn mark_matches(snapshot: &mut Snapshot) {
 
 #[cfg(test)]
 mod tests {
-    use crate::overlay::{score, tail};
+    use jet_core::{Key, KeyAction, KeyInput, Mods};
+
+    use crate::overlay::{Field, score, tail};
+
+    fn key(field: &mut Field, key: Key, mods: Mods) -> Option<bool> {
+        field.edit(&KeyInput {
+            key,
+            action: KeyAction::Press,
+            mods,
+            text: None,
+            unshifted: None,
+        })
+    }
 
     #[test]
     fn fuzzy_prefers_word_starts_and_runs() {
@@ -579,5 +680,30 @@ mod tests {
     fn long_queries_show_their_end() {
         assert_eq!(tail("hello world", 5), "world");
         assert_eq!(tail("hi", 5), "hi");
+    }
+
+    #[test]
+    fn fields_edit_at_the_cursor_by_char_and_word() {
+        let mut f = Field::new("git log --oneline");
+        assert_eq!(key(&mut f, Key::ArrowLeft, Mods::CTRL), Some(false));
+        assert_eq!(f.after(), "oneline");
+        key(&mut f, Key::ArrowLeft, Mods::CTRL);
+        assert_eq!(f.after(), "log --oneline");
+        assert_eq!(key(&mut f, Key::Backspace, Mods::CTRL), Some(true));
+        assert_eq!((f.text.as_str(), f.at), ("log --oneline", 0));
+        key(&mut f, Key::ArrowRight, Mods::CTRL);
+        assert_eq!(f.before(), "log");
+        assert!(f.insert("ö"));
+        key(&mut f, Key::ArrowLeft, Mods::empty());
+        assert_eq!(key(&mut f, Key::Delete, Mods::empty()), Some(true));
+        assert_eq!(f.text, "log --oneline");
+        assert_eq!(key(&mut f, Key::Delete, Mods::CTRL), Some(true));
+        assert_eq!(f.text, "log");
+        // the view keeps the cursor in it
+        f = Field::new("hello world");
+        key(&mut f, Key::Home, Mods::empty());
+        assert_eq!(f.view(5), ("hello world", 0));
+        key(&mut f, Key::End, Mods::empty());
+        assert_eq!(f.view(5), ("orld", 4));
     }
 }

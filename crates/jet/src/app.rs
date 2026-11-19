@@ -297,8 +297,10 @@ struct PaneSlot {
     /// The same report, remote or not, and when it came.
     location: Option<Location>,
     location_at: Instant,
-    /// User variables the shell set (OSC 1337 SetUserVar).
+    /// User variables the shell set (OSC 1337 SetUserVar), and when the
+    /// last one came.
     vars: HashMap<String, String>,
+    vars_at: Instant,
     /// The last command's exit status (OSC 133;D).
     exit: Option<i32>,
     /// The program in front and its working directory, looked up while
@@ -718,6 +720,7 @@ impl<H: Host> App<H> {
                 location: None,
                 location_at: Instant::now(),
                 vars: HashMap::new(),
+                vars_at: Instant::now(),
                 exit: None,
                 front: None,
                 front_cwd: None,
@@ -1794,6 +1797,7 @@ impl<H: Host> App<H> {
 
     fn set_var(&mut self, pane: PaneId, name: String, value: String) {
         if let Some(slot) = self.panes.get_mut(&pane) {
+            slot.vars_at = Instant::now();
             if value.is_empty() {
                 slot.vars.remove(&name);
             } else {
@@ -1920,6 +1924,7 @@ impl<H: Host> App<H> {
         };
         let pid = slot.pane.pid();
         let process = pid.and_then(jet_pty::foreground);
+        let mut cleared = Vec::new();
         if process.as_ref().map(|p| p.pid) != slot.front.as_ref().map(|f| f.process.pid) {
             // Something else is in front: a place reported before it could
             // have started (the shell's, before ssh; ssh's, after it exits)
@@ -1927,15 +1932,28 @@ impl<H: Host> App<H> {
             if slot.location_at <= since {
                 slot.location = None;
             }
-            slot.front = process.map(|process| {
+            let front = process.map(|process| {
                 let argv = jet_config::Command::Line(process.command_line.clone()).argv();
                 Front {
                     ssh: jet_core::ssh_target(&argv),
                     process,
                 }
             });
+            // Likewise the variables, across ssh: the remote shell's
+            // outlive it otherwise, as the local one may not reset them.
+            // Not for any other program, whose shell's still apply.
+            let ssh = |f: &Option<Front>| f.as_ref().is_some_and(|f| f.ssh.is_some());
+            let stale = (ssh(&slot.front) || ssh(&front)) && slot.vars_at <= since;
+            slot.front = front;
+            if stale {
+                cleared.extend(slot.vars.drain().map(|(name, _)| name));
+            }
         }
         slot.front_cwd = pid.and_then(jet_pty::process_cwd);
+        for name in cleared {
+            let value = String::new();
+            self.emit(What::Var { name, value }, Some(id));
+        }
         let restyled = self.refresh_host(id);
         if self.refresh_status() || restyled {
             self.render();
@@ -3029,7 +3047,7 @@ impl<H: Host> App<H> {
         if self.host.quake() {
             list.push(("Quake: reset position".into(), Action::ResetQuake));
         }
-        list.push((format!("About: {} (copy)", version()), Action::CopyVersion));
+        list.push((format!("Copy version: {}", version()), Action::CopyVersion));
         list.extend([
             ("Open config".into(), Action::OpenConfig),
             ("Choose theme".into(), Action::ChooseTheme),

@@ -2,6 +2,13 @@
 
 What changed in each release of jet and jetmux, newest first. Link to a version by its heading, dots dropped: `CHANGELOG.md#011` is [0.1.1](#011). A release's GitHub notes start with its section here.
 
+## 0.1.4
+
+- The palette, find bar and tab-name prompt edit anywhere: arrows, Home/End, Delete, and Ctrl (Alt on macOS) for a word at a time.
+- The palette finds the version by typing `version`; Enter copies it.
+- Status variables a remote shell set clear when `ssh` exits, even if the local shell doesn't reset them.
+- jet attached to a jetmux session gets the panes' status variables right away, not at the next prompt.
+
 ## 0.1.3
 
 - jetmux releases for aarch64 Linux (static, like x86_64's) and Apple silicon macOS. Intel Macs aren't supported.
