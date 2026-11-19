@@ -2,6 +2,11 @@
 
 What changed in each release of jet and jetmux, newest first. Link to a version by its heading, dots dropped: `CHANGELOG.md#011` is [0.1.1](#011). A release's GitHub notes start with its section here.
 
+## 0.1.3
+
+- jetmux releases for aarch64 Linux (static, like x86_64's) and Apple silicon macOS. Intel Macs aren't supported.
+- jetmux on macOS: the daemon answers requests. It failed every one, since macOS gives accepted sockets the listener's non-blocking mode.
+
 ## 0.1.2
 
 - `jet --version | head -1`, `jet-cli list | head` and `jetmux ls | head` end quietly instead of panicking when the reader closes the pipe.

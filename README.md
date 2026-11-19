@@ -94,11 +94,11 @@ A tmux-style daemon that owns the shells, so sessions outlive any client.
 | **Windows** | The `.msi` (per-user, no admin: Start Menu, PATH, "Open jet here" in Explorer, upgrades in place), or Scoop: `scoop install https://github.com/jpetrucciani/jet/releases/latest/download/jet.json`, then `scoop update jet`. Or unzip anywhere, keeping `conpty.dll` and `OpenConsole.exe` beside `jet.exe` (a newer ConPTY than Windows ships). |
 | **macOS**   | Move `jet.app` to Applications. Not notarized yet: allow it under Privacy & Security, or `xattr -dr com.apple.quarantine /Applications/jet.app`.                                                                                                                                                                                                 |
 | **Linux**   | Put `jet` and `jet-cli` on `PATH`. Needs Vulkan (or GL) and Wayland or X11, glibc 2.35+.                                                                                                                                                                                                                                                         |
-| **jetmux**  | Static binaries for any x86_64 Linux: untar onto `PATH` on each server.                                                                                                                                                                                                                                                                          |
+| **jetmux**  | Static binaries for any x86_64 or aarch64 Linux, and Apple silicon macOS: untar onto `PATH` on each server.                                                                                                                                                                                                                                      |
 | **Nix**     | `import ./jet { }` gives `jetmux`, `jetmux-static` and `homeManagerModules.default` (`programs.jet`, `programs.jetmux`, with a systemd user service).                                                                                                                                                                                            |
 
 jet's x86_64 builds need AVX2 (x86-64-v3: Intel Haswell, AMD Zen or newer).
-jetmux's run on any x86_64.
+jetmux's run on any x86_64 or aarch64.
 
 ## Configure
 
@@ -191,7 +191,7 @@ Rust, Zig and libghostty. Windows binaries cross-compile from Linux.
 | `dist_linux`, `dist_win`, `dist_mac` | jet release archives in `target/dist`, profile-guided (Windows: zip and MSI, signed when `JET_SIGN_TOKEN` is set)        |
 | `update_themes --release TAG`        | refresh the built-in themes from an iTerm2-Color-Schemes release                                                         |
 | `win_manifests`                      | Scoop's `jet.json` and winget's manifests for the release in `target/dist`                                               |
-| `dist_jetmux`                        | jetmux's static release tarball                                                                                          |
+| `dist_jetmux`                        | jetmux's release tarballs: static x86_64 and aarch64 Linux, Apple silicon macOS                                          |
 | `pgo`, `pgo_win_bundle`              | record the profiles the dist builds use (Windows: run the bundle's `run.cmd` there, copy `raw/` to `target/pgo/win-raw`) |
 
 Releases: bumping `[workspace.package] version` on main builds every

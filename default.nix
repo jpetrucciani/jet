@@ -23,8 +23,8 @@ let
   rust = pkgs.rust-bin.selectLatestNightlyWith (toolchain: toolchain.default.override {
     # llvm-tools: an llvm-profdata on rustc's own LLVM, for pgo.
     extensions = [ "rust-src" "rustc-dev" "rust-analyzer" "llvm-tools" ];
-    # musl and macOS: jetmux's static server binary and universal Mac build.
-    targets = [ "x86_64-unknown-linux-gnu" winTarget jetmuxTarget "aarch64-apple-darwin" "x86_64-apple-darwin" ];
+    # musl and macOS: jetmux's static server binaries and Apple silicon build.
+    targets = [ "x86_64-unknown-linux-gnu" winTarget ] ++ jetmuxTargets;
   });
 
   # must match GHOSTTY_COMMIT in libghostty-vt-sys's build.rs; bump both together.
@@ -47,6 +47,9 @@ let
     '';
   };
   jetmuxTarget = "x86_64-unknown-linux-musl";
+  # What dist_jetmux releases, all cross-built from x86_64 linux: static
+  # musl for servers of either arch, and Apple silicon macOS.
+  jetmuxTargets = [ jetmuxTarget "aarch64-unknown-linux-musl" "aarch64-apple-darwin" ];
   # The one version, from [workspace.package].
   version = (pkgs.lib.importTOML ./Cargo.toml).workspace.package.version;
   node = pkgs.nodejs_22;
@@ -530,29 +533,70 @@ let
     };
     dist_jetmux = pog {
       name = "dist_jetmux";
-      description = "tar jetmux's static binaries (any x86_64 linux, baseline cpu) for a release into target/dist";
+      description = "tar jetmux's binaries for a release into target/dist: static linux (x86_64, aarch64) and apple silicon macos, cross-built from x86_64 linux";
+      flags = [
+        { name = "platform"; description = "linux-x86_64, linux-aarch64 or macos-arm64 (default: all three)"; }
+      ];
       script = ''
         set -euo pipefail
         [ "$(uname)" = Linux ] || die "dist_jetmux runs on linux"
         ${jetmux_web_build}/bin/jetmux_web_build
-        # A server binary runs on whatever box it's copied to: no -C target-cpu.
+        # A server binary runs on whatever box it's copied to: no CPU floor.
         unset LIBGHOSTTY_VT_SYS_CPU
         bins=(jetmux jetmux-web jetmux-notify jetmux-mcp jetmux-rec)
-        cargo build --locked --release --target ${jetmuxTarget} "''${bins[@]/#/-p=}"
+        packages=("''${bins[@]/#/-p=}")
         ${setVersion}
-        name="jetmux-$version-linux-x86_64"
-        rm -rf "target/dist/$name"
-        mkdir -p "target/dist/$name"
-        for exe in "''${bins[@]}"; do
-          if readelf -l "target/${jetmuxTarget}/release/$exe" | grep -q INTERP; then
-            die "$exe isn't static"
-          fi
-          cp "target/${jetmuxTarget}/release/$exe" "target/dist/$name/"
+        # linux: no interpreter, so it runs on any distro
+        static() {
+          for exe in "''${bins[@]}"; do
+            if readelf -l "target/$1/release/$exe" | grep -q INTERP; then
+              die "$exe ($1) isn't static"
+            fi
+          done
+        }
+        # platform, the binaries' dir, the target whose licenses to list
+        pack() {
+          name="jetmux-$version-$1"
+          rm -rf "target/dist/$name"
+          mkdir -p "target/dist/$name"
+          for exe in "''${bins[@]}"; do cp "$2/$exe" "target/dist/$name/"; done
+          cp docs/jetmux.toml LICENSE "target/dist/$name/"
+          ${notices}/bin/notices --workspace --target "$3" -o "target/dist/$name/THIRD-PARTY-NOTICES"
+          tar -C target/dist --owner=0 --group=0 -czf "target/dist/$name.tar.gz" "$name"
+          green "target/dist/$name.tar.gz"
+        }
+        for platform in ''${platform:-linux-x86_64 linux-aarch64 macos-arm64}; do
+          case $platform in
+            linux-x86_64)
+              cargo build --locked --release --target ${jetmuxTarget} "''${packages[@]}"
+              static ${jetmuxTarget}
+              pack "$platform" target/${jetmuxTarget}/release ${jetmuxTarget}
+              ;;
+            linux-aarch64)
+              # zigbuild's zig cc compiles the C (ring's), as the dev shell's
+              # cc only targets x86_64. rustc's own lld links (--config wins
+              # over zigbuild's linker): zig cc rejects rustc's
+              # -mfix-cortex-a53-843419.
+              t=aarch64-unknown-linux-musl
+              cargo zigbuild --locked --release --target $t --config "target.$t.linker=\"rust-lld\"" "''${packages[@]}"
+              static $t
+              pack "$platform" target/$t/release $t
+              ;;
+            macos-arm64)
+              # Apple silicon only: Intel Macs are past Apple's support.
+              # zig links against its own macOS stubs, and signs ad hoc.
+              t=aarch64-apple-darwin
+              cargo zigbuild --locked --release --target $t "''${packages[@]}"
+              for exe in "''${bins[@]}"; do
+                if llvm-otool -L "target/$t/release/$exe" | tail -n +2 | grep -Ev '^\s+/(usr/lib|System)/'; then
+                  die "$exe links something macOS doesn't have"
+                fi
+              done
+              pack "$platform" target/$t/release $t
+              ;;
+            *) die "unknown platform $platform" ;;
+          esac
         done
-        cp docs/jetmux.toml LICENSE "target/dist/$name/"
-        ${notices}/bin/notices --workspace --target ${jetmuxTarget} -o "target/dist/$name/THIRD-PARTY-NOTICES"
-        tar -C target/dist --owner=0 --group=0 -czf "target/dist/$name.tar.gz" "$name"
-        green "target/dist/$name.tar.gz"
       '';
     };
     dist_win = pog {
@@ -763,14 +807,6 @@ let
         if [ -n "''${desktop:-}" ]; then query=""; fi
         curl -fsS -o "$out" "$host/screenshot$query"
         echo "$out"
-      '';
-    };
-    jetmux_macos = pog {
-      name = "jetmux_macos";
-      description = "cross-build a universal (arm64 + x86_64) macOS binary of jetmux";
-      script = ''
-        cargo zigbuild --release -p jetmux --target universal2-apple-darwin
-        ls -la target/universal2-apple-darwin/release/jetmux
       '';
     };
     jetmux_ts = pog {

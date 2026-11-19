@@ -73,11 +73,16 @@ jobs:
           path: target/dist/*.tar.gz
           if-no-files-found: error
 
-  # jetmux runs on servers: static musl binaries for any x86_64 Linux.
+  # jetmux runs on servers: static musl binaries for any x86_64 or aarch64
+  # Linux, and an Apple silicon macOS build. All cross-built from Linux, one
+  # platform per job so they build side by side.
   jetmux:
     needs: detect
     if: needs.detect.outputs.release == 'true'
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        platform: [linux-x86_64, linux-aarch64, macos-arm64]
     steps:
       - uses: actions/checkout@v4
       - uses: cachix/install-nix-action@v31
@@ -85,11 +90,11 @@ jobs:
           nix_path: nixpkgs=${{ env.NIXPKGS }}
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-jetmux
-      - run: nix-shell --run dist_jetmux
+          key: release-jetmux-${{ matrix.platform }}
+      - run: nix-shell --run 'dist_jetmux --platform ${{ matrix.platform }}'
       - uses: actions/upload-artifact@v4
         with:
-          name: jetmux
+          name: jetmux-${{ matrix.platform }}
           path: target/dist/jetmux-*.tar.gz
           if-no-files-found: error
 
@@ -225,7 +230,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
-          pattern: '{linux,jetmux,windows,macos}'
+          pattern: '{linux,jetmux-*,windows,macos}'
           merge-multiple: true
       - uses: actions/checkout@v4
         with:

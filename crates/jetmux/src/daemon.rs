@@ -246,6 +246,9 @@ fn serve(
 /// Serve one connection: a binary client's handshake and first request, or
 /// an RPC connection for as long as it stays open.
 fn connection(registry: &Arc<Registry>, mut stream: UnixStream) -> Result<(), BoxError> {
+    // Its own thread, so blocking. macOS hands out accepted sockets with
+    // the listener's O_NONBLOCK (Linux doesn't), and every read failed.
+    stream.set_nonblocking(false)?;
     stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT))?;
     let (kind, payload) = jetmux_proto::read_frame(&mut stream)?;
     if kind == FrameKind::Rpc {
