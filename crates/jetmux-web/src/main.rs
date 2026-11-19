@@ -549,6 +549,19 @@ fn router(app: Arc<App>) -> Router {
 }
 
 fn main() {
+    if std::env::args()
+        .nth(1)
+        .is_some_and(|a| a == "--version" || a == "-V")
+    {
+        use std::io::Write as _;
+        // writeln, not println: a closed pipe isn't worth a panic
+        let _ = writeln!(
+            std::io::stdout(),
+            "jetmux-web {}",
+            env!("CARGO_PKG_VERSION")
+        );
+        return;
+    }
     let mut args = std::env::args().skip(1);
     let mut server = "default".to_owned();
     let mut listen = None;

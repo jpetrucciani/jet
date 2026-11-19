@@ -28,6 +28,18 @@ cat      print the output without timing";
 type BoxError = Box<dyn std::error::Error>;
 
 fn main() {
+    if std::env::args()
+        .nth(1)
+        .is_some_and(|a| a == "--version" || a == "-V")
+    {
+        // writeln, not println: a closed pipe isn't worth a panic
+        let _ = writeln!(
+            std::io::stdout(),
+            "jetmux-rec {}",
+            env!("CARGO_PKG_VERSION")
+        );
+        return;
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("record") => record(&args[1..]),

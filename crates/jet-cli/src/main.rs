@@ -57,11 +57,11 @@ struct Invocation {
 
 fn run(args: Vec<String>) -> Result<ExitCode, String> {
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("jet-cli {}", env!("CARGO_PKG_VERSION"));
+        emit(|out| writeln!(out, "jet-cli {}", env!("CARGO_PKG_VERSION")))?;
         return Ok(ExitCode::SUCCESS);
     }
     if args.iter().any(|a| a == "-h" || a == "--help") || args.is_empty() {
-        println!("{USAGE}");
+        emit(|out| writeln!(out, "{USAGE}"))?;
         return Ok(ExitCode::SUCCESS);
     }
     let here = std::env::var(PANE_VAR).ok().and_then(|p| p.parse().ok());
@@ -82,10 +82,8 @@ fn run(args: Vec<String>) -> Result<ExitCode, String> {
     let streaming = matches!(invocation.request, Request::Events(_));
     let reply = client.call(invocation.request).map_err(|e| e.to_string())?;
     if invocation.json {
-        println!(
-            "{}",
-            serde_json::to_string(&reply).map_err(|e| e.to_string())?
-        );
+        let json = serde_json::to_string(&reply).map_err(|e| e.to_string())?;
+        emit(|out| writeln!(out, "{json}"))?;
     }
     let answer = match reply.body {
         Body::Ok(answer) => answer,
@@ -111,26 +109,37 @@ fn run(args: Vec<String>) -> Result<ExitCode, String> {
         }
     }
     if !invocation.json {
-        print_answer(&answer);
+        emit(|out| print_answer(out, &answer))?;
     }
     Ok(ExitCode::SUCCESS)
 }
 
-fn print_answer(answer: &Answer) {
-    match answer {
-        Answer::List(listing) => print_listing(listing),
-        Answer::Opened(opened) => println!("{}", opened.pane),
-        Answer::Text(text) => println!("{}", text.text),
-        Answer::Hello(hello) => println!("jet {} (protocol {})", hello.pid, hello.version),
-        Answer::Done(_) => {}
+/// Write to stdout. A reader that has gone (`jet-cli list | head -1`)
+/// ends the output quietly, where println! panics.
+fn emit(write: impl FnOnce(&mut io::StdoutLock) -> io::Result<()>) -> Result<(), String> {
+    let mut out = io::stdout().lock();
+    match write(&mut out).and_then(|()| out.flush()) {
+        Err(e) if e.kind() != io::ErrorKind::BrokenPipe => Err(e.to_string()),
+        _ => Ok(()),
     }
 }
 
-fn print_listing(listing: &Listing) {
-    println!(
+fn print_answer(out: &mut impl Write, answer: &Answer) -> io::Result<()> {
+    match answer {
+        Answer::List(listing) => print_listing(out, listing),
+        Answer::Opened(opened) => writeln!(out, "{}", opened.pane),
+        Answer::Text(text) => writeln!(out, "{}", text.text),
+        Answer::Hello(hello) => writeln!(out, "jet {} (protocol {})", hello.pid, hello.version),
+        Answer::Done(_) => Ok(()),
+    }
+}
+
+fn print_listing(out: &mut impl Write, listing: &Listing) -> io::Result<()> {
+    writeln!(
+        out,
         "{:<5} {:<5} {:<9} {:<28} CWD",
         "TAB", "PANE", "SIZE", "TITLE"
-    );
+    )?;
     for tab in &listing.tabs {
         for pane in &tab.panes {
             let mark = if tab.active && pane.focused { "*" } else { " " };
@@ -140,15 +149,17 @@ fn print_listing(listing: &Listing) {
                 _ => String::new(),
             };
             let title: String = pane.title.chars().take(28).collect();
-            println!(
+            writeln!(
+                out,
                 "{:<5} {:<5} {:<9} {:<28} {cwd}",
                 tab.id,
                 format!("{}{mark}", pane.id),
                 format!("{}x{}", pane.cols, pane.rows),
                 title,
-            );
+            )?;
         }
     }
+    Ok(())
 }
 
 /// `--socket`, else `$JET_SOCKET`, else the one jet running.

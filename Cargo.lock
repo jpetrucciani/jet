@@ -1351,7 +1351,7 @@ checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
 
 [[package]]
 name = "jet"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "arboard",
  "jet-cli",
@@ -1373,7 +1373,7 @@ dependencies = [
 
 [[package]]
 name = "jet-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -1382,7 +1382,7 @@ dependencies = [
 
 [[package]]
 name = "jet-config"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "jet-core",
  "regex",
@@ -1392,7 +1392,7 @@ dependencies = [
 
 [[package]]
 name = "jet-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "jetmux-proto",
  "libghostty-vt",
@@ -1403,7 +1403,7 @@ dependencies = [
 
 [[package]]
 name = "jet-devhost"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "axum",
  "png",
@@ -1414,7 +1414,7 @@ dependencies = [
 
 [[package]]
 name = "jet-font"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "fontdb",
  "harfrust",
@@ -1424,7 +1424,7 @@ dependencies = [
 
 [[package]]
 name = "jet-pty"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "libc",
  "portable-pty",
@@ -1433,7 +1433,7 @@ dependencies = [
 
 [[package]]
 name = "jet-render"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytemuck",
  "jet-core",
@@ -1444,7 +1444,7 @@ dependencies = [
 
 [[package]]
 name = "jet-replay"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "insta",
  "jet-core",
@@ -1455,7 +1455,7 @@ dependencies = [
 
 [[package]]
 name = "jetmux"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "jet-config",
  "jet-core",
@@ -1477,7 +1477,7 @@ dependencies = [
 
 [[package]]
 name = "jetmux-client"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "jetmux-proto",
  "rustix 1.1.6",
@@ -1488,7 +1488,7 @@ dependencies = [
 
 [[package]]
 name = "jetmux-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "jet-core",
  "jetmux-proto",
@@ -1500,7 +1500,7 @@ dependencies = [
 
 [[package]]
 name = "jetmux-mcp"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "jetmux-client",
  "jetmux-proto",
@@ -1510,7 +1510,7 @@ dependencies = [
 
 [[package]]
 name = "jetmux-notify"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "aes-gcm",
  "hkdf",
@@ -1532,7 +1532,7 @@ dependencies = [
 
 [[package]]
 name = "jetmux-proto"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "postcard",
  "serde",
@@ -1543,7 +1543,7 @@ dependencies = [
 
 [[package]]
 name = "jetmux-rec"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "jetmux-client",
  "jetmux-proto",
@@ -1554,7 +1554,7 @@ dependencies = [
 
 [[package]]
 name = "jetmux-render"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "jetmux-core",
  "jetmux-proto",
@@ -1562,7 +1562,7 @@ dependencies = [
 
 [[package]]
 name = "jetmux-roam"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "aes-gcm",
  "jetmux-proto",
@@ -1572,7 +1572,7 @@ dependencies = [
 
 [[package]]
 name = "jetmux-web"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "axum",
  "hmac",

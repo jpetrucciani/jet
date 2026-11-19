@@ -103,6 +103,18 @@ fn handle(tools: &Tools, method: &str, params: Value) -> Result<Value, Error> {
 }
 
 fn main() {
+    if std::env::args()
+        .nth(1)
+        .is_some_and(|a| a == "--version" || a == "-V")
+    {
+        // writeln, not println: a closed pipe isn't worth a panic
+        let _ = writeln!(
+            std::io::stdout(),
+            "jetmux-mcp {}",
+            env!("CARGO_PKG_VERSION")
+        );
+        return;
+    }
     let mut args = std::env::args().skip(1);
     let mut tools = Tools {
         server: "default".into(),

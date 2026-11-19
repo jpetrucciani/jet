@@ -160,6 +160,34 @@ enum Cmd {
     RemoteServe(remote::ServeArgs),
 }
 
+impl Cmd {
+    /// Prints and exits, so it can die of SIGPIPE. Not the ones that
+    /// attach or serve: a socket closing under them would kill them with
+    /// the terminal still raw, or take a daemon down.
+    fn prints_and_exits(&self) -> bool {
+        match self {
+            Cmd::New { detached, .. } | Cmd::Up { detached, .. } => *detached,
+            Cmd::List
+            | Cmd::Kill { .. }
+            | Cmd::KillServer
+            | Cmd::Call { .. }
+            | Cmd::LayoutSave { .. }
+            | Cmd::Events { .. }
+            | Cmd::Help
+            | Cmd::Version
+            | Cmd::ShellInit(_)
+            | Cmd::Snapshot
+            | Cmd::Restore => true,
+            Cmd::Attach { .. }
+            | Cmd::Proxy { .. }
+            | Cmd::Daemon { .. }
+            | Cmd::Upgrade
+            | Cmd::Remote(_)
+            | Cmd::RemoteServe(_) => false,
+        }
+    }
+}
+
 /// Flags and positional arguments of one subcommand.
 #[derive(Debug, Default)]
 struct Args {
@@ -622,6 +650,12 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if cli.cmd.prints_and_exits() {
+        // End quietly when the reader goes (`jetmux ls | head`), as Unix
+        // tools do, instead of panicking in println!.
+        // SAFETY: no other threads yet; this restores the default action.
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+    }
     match run(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

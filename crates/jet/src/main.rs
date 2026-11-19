@@ -31,6 +31,7 @@ mod status;
 #[cfg(windows)]
 mod taskbar;
 
+use std::fmt::Write as _;
 use std::process::ExitCode;
 
 use libghostty_vt::build_info;
@@ -39,7 +40,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|a| a == "-h" || a == "--help") {
         attach_console();
-        println!("{}", app::USAGE);
+        print(&format!("{}\n", app::USAGE));
         return ExitCode::SUCCESS;
     }
     if args.first().is_some_and(|a| a == "config") {
@@ -55,8 +56,11 @@ fn main() -> ExitCode {
     if args.first().is_some_and(|a| a == "--version" || a == "-V") {
         // A GUI program on Windows: print to the shell that ran it.
         attach_console();
-        return match print_build_info() {
-            Ok(()) => ExitCode::SUCCESS,
+        return match build_info() {
+            Ok(text) => {
+                print(&text);
+                ExitCode::SUCCESS
+            }
             Err(err) => {
                 eprintln!("jet: failed to query libghostty-vt build info: {err}");
                 ExitCode::FAILURE
@@ -109,39 +113,48 @@ fn main() -> ExitCode {
 /// Print where the config comes from, what was ignored and the result.
 fn config_check() -> ExitCode {
     let dirs = jet_config::Dirs::from_env();
-    match jet_config::load(&dirs) {
-        Ok(loaded) => {
-            if loaded.sources.is_empty() {
-                println!("no config file; tried:");
-                for path in dirs.candidates() {
-                    println!("  {}", path.display());
-                }
-            }
-            for source in &loaded.sources {
-                println!("read {}", source.display());
-            }
-            for path in &loaded.absent {
-                println!("skipped {} (not there)", path.display());
-            }
-            for warning in &loaded.warnings {
-                println!("warning: {warning}");
-            }
-            match loaded.config.to_toml() {
-                Ok(text) => {
-                    println!("\n{text}");
-                    ExitCode::SUCCESS
-                }
-                Err(err) => {
-                    eprintln!("jet: {err}");
-                    ExitCode::FAILURE
-                }
-            }
-        }
+    let loaded = match jet_config::load(&dirs) {
+        Ok(loaded) => loaded,
         Err(err) => {
             eprintln!("jet: {err}");
-            ExitCode::FAILURE
+            return ExitCode::FAILURE;
+        }
+    };
+    let config = match loaded.config.to_toml() {
+        Ok(text) => text,
+        Err(err) => {
+            eprintln!("jet: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    // Writing to a String can't fail.
+    let mut out = String::new();
+    if loaded.sources.is_empty() {
+        out.push_str("no config file; tried:\n");
+        for path in dirs.candidates() {
+            let _ = writeln!(out, "  {}", path.display());
         }
     }
+    for source in &loaded.sources {
+        let _ = writeln!(out, "read {}", source.display());
+    }
+    for path in &loaded.absent {
+        let _ = writeln!(out, "skipped {} (not there)", path.display());
+    }
+    for warning in &loaded.warnings {
+        let _ = writeln!(out, "warning: {warning}");
+    }
+    let _ = writeln!(out, "\n{config}");
+    print(&out);
+    ExitCode::SUCCESS
+}
+
+/// Print for the commands that print and exit. A reader that has gone
+/// (`jet --version | head -1`) isn't an error, where println! panics.
+fn print(text: &str) {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    let _ = out.write_all(text.as_bytes()).and_then(|()| out.flush());
 }
 
 /// A GUI-subsystem exe gets no console: borrow the one it was started
@@ -154,23 +167,21 @@ fn attach_console() {
     }
 }
 
-fn print_build_info() -> Result<(), libghostty_vt::Error> {
-    println!(
-        "jet {} ({}-{})",
+fn build_info() -> Result<String, libghostty_vt::Error> {
+    Ok(format!(
+        "jet {} ({}-{})\n\
+         libghostty-vt {}\n  \
+         optimize: {:?}\n  \
+         simd: {}\n  \
+         kitty graphics: {}\n  \
+         tmux control mode: {}\n",
         env!("CARGO_PKG_VERSION"),
         std::env::consts::ARCH,
-        std::env::consts::OS
-    );
-    println!("libghostty-vt {}", build_info::version_string()?);
-    println!("  optimize: {:?}", build_info::optimize_mode()?);
-    println!("  simd: {}", build_info::supports_simd()?);
-    println!(
-        "  kitty graphics: {}",
-        build_info::supports_kitty_graphics()?
-    );
-    println!(
-        "  tmux control mode: {}",
-        build_info::supports_tmux_control_mode()?
-    );
-    Ok(())
+        std::env::consts::OS,
+        build_info::version_string()?,
+        build_info::optimize_mode()?,
+        build_info::supports_simd()?,
+        build_info::supports_kitty_graphics()?,
+        build_info::supports_tmux_control_mode()?,
+    ))
 }
