@@ -227,14 +227,25 @@ jobs:
           path: dist
           pattern: '{linux,jetmux,windows,macos}'
           merge-multiple: true
-      # gh creates the tag at this commit along with the release.
+      - uses: actions/checkout@v4
+        with:
+          path: src
+          sparse-checkout: CHANGELOG.md
+          sparse-checkout-cone-mode: false
+      # gh creates the tag at this commit along with the release. The notes
+      # are the version's CHANGELOG.md section (empty if it has none), then
+      # GitHub's list of what was merged.
       - env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.detect.outputs.version }}
         run: |
           ls -l dist
+          awk -v v="## $VERSION" '$0 == v { on = 1; next } on && /^## / { exit } on' \
+            src/CHANGELOG.md > notes.md
+          cat notes.md
           gh release create "v$VERSION" dist/* \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "jet $VERSION" \
+            --notes-file notes.md \
             --generate-notes

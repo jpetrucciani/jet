@@ -195,7 +195,8 @@ Rust, Zig and libghostty. Windows binaries cross-compile from Linux.
 | `pgo`, `pgo_win_bundle`              | record the profiles the dist builds use (Windows: run the bundle's `run.cmd` there, copy `raw/` to `target/pgo/win-raw`) |
 
 Releases: bumping `[workspace.package] version` on main builds every
-archive and publishes `v<version>`.
+archive and publishes `v<version>`, its notes from that version's section
+of [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
