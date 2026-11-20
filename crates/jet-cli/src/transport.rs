@@ -119,6 +119,12 @@ impl Client {
         }
         Ok(line)
     }
+
+    /// Give up on a reply after `timeout`, as from a window that's stuck.
+    #[cfg(unix)]
+    pub fn set_timeout(&self, timeout: std::time::Duration) -> io::Result<()> {
+        self.reader.get_ref().set_read_timeout(Some(timeout))
+    }
 }
 
 #[cfg(windows)]

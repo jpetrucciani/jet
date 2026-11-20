@@ -2,6 +2,10 @@
 
 What changed in each release of jet and jetmux, newest first. Link to a version by its heading, dots dropped: `CHANGELOG.md#011` is [0.1.1](#011). A release's GitHub notes start with its section here.
 
+## 0.1.5
+
+- macOS: jet no longer hangs on opening when no `jet quake` is running. Starting the quake window for `[quake] autostart`, it asked every running jet whether it was the quake window, itself included, and waited forever for its own answer.
+
 ## 0.1.4
 
 - The palette, find bar and tab-name prompt edit anywhere: arrows, Home/End, Delete, and Ctrl (Alt on macOS) for a word at a time.

@@ -12,20 +12,32 @@ use winit::monitor::MonitorHandle;
 use winit::window::{Window, WindowLevel};
 
 /// Whether a `jet quake` is running, asking it to toggle with `toggle`.
+/// Not this jet: its main thread, which would answer, is the one asking.
+/// And briefly: a stuck jet mustn't hang this one's start too.
 pub fn signal_running(toggle: bool) -> bool {
     let Ok(running) = transport::running() else {
         return false;
     };
-    running.iter().any(|(_, address)| {
-        let Ok(mut client) = Client::connect(address) else {
-            return false;
-        };
-        let is_quake = matches!(
-            client.call(Request::Hello).map(|r| r.body),
-            Ok(Body::Ok(Answer::Hello(hello))) if hello.quake
-        );
-        is_quake && (!toggle || client.call(Request::ToggleQuake).is_ok())
-    })
+    let me = std::process::id();
+    running
+        .iter()
+        .filter(|(pid, _)| *pid != me)
+        .any(|(_, address)| {
+            let Ok(mut client) = Client::connect(address) else {
+                return false;
+            };
+            if client
+                .set_timeout(std::time::Duration::from_secs(1))
+                .is_err()
+            {
+                return false;
+            }
+            let is_quake = matches!(
+                client.call(Request::Hello).map(|r| r.body),
+                Ok(Body::Ok(Answer::Hello(hello))) if hello.quake
+            );
+            is_quake && (!toggle || client.call(Request::ToggleQuake).is_ok())
+        })
 }
 
 /// Place per `quake` on its monitor (or with `!replace`, leave it where
