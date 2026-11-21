@@ -80,14 +80,18 @@ fn main() -> ExitCode {
             }
         }
     };
-    let background = quake && args.get(1).is_some_and(|a| a == app::BACKGROUND);
+    // jet quake [NAME] [--background], and the flags below.
+    let flags = if quake { &args[1..] } else { &[] };
+    let flag = |name: &str| flags.iter().any(|a| a == name);
+    let background = flag(app::BACKGROUND);
     #[cfg(windows)]
     {
-        if quake && args.get(1).is_some_and(|a| a == quake::UNINSTALL) {
+        let name = flags.iter().find(|a| !a.starts_with("--")).cloned();
+        if quake && flag(quake::UNINSTALL) {
             quake::uninstall();
             return ExitCode::SUCCESS;
         }
-        if quake && args.get(1).is_some_and(|a| a == quake::AUTOSTART) {
+        if quake && flag(quake::AUTOSTART) {
             // A config that doesn't load: the default, on.
             let config = jet_config::load(&jet_config::Dirs::from_env());
             let on = config.map_or(true, |l| l.config.quake.autostart);
@@ -96,7 +100,19 @@ fn main() -> ExitCode {
                 Err(_) => ExitCode::FAILURE,
             };
         }
-        app::win32::run(quake, background, first)
+        if quake && flag(quake::WINDOW) {
+            return app::win32::run(Some(name), background, first);
+        }
+        if quake {
+            return match quake::coordinate(background, name) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err) => {
+                    eprintln!("jet: {err}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        app::win32::run(None, background, first)
     }
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {

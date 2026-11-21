@@ -252,12 +252,20 @@ style = "powerline"           # powerline | round | plain
 
 # `jet quake`: a window a global hotkey shows and hides. Running `jet quake`
 # again toggles it too: on Linux, which has no hotkey here, bind that in
-# your desktop's shortcuts (it runs on X11 or XWayland).
+# your desktop's shortcuts (it runs on X11 or XWayland). On Windows it has
+# a tray icon (under the taskbar's ^ until you pin it there): click to
+# toggle, right click to toggle one window or quit.
 [quake]
-hotkey = "ctrl+space"         # a chord as in [keybinds], Windows and macOS
+hotkey = "ctrl+space"         # a chord as in [keybinds], or a list of them
+                              # (Windows); Windows and macOS
                               # ("ctrl+grave" there: Ctrl+Space switches input
                               # sources). Ctrl+Space is also Windows' CJK IME
                               # toggle; "super+grave" avoids it
+hotkey-hook = false           # Windows: also catch it with a keyboard hook,
+                              # for games that turn hotkeys off while in
+                              # front (League of Legends; the Win key dies
+                              # there too). Swallows the chord there; not
+                              # over windows running as admin
 monitor = "cursor"            # cursor (the one under the mouse) | primary
 x = 0.0                       # placement as fractions of the monitor's work
 y = 0.0                       # area: the left third is width = 0.333,
@@ -267,6 +275,8 @@ height = 0.45
                               # (not a jetmux one); unset: [window] profile,
                               # else [shell]'s
 hide-on-blur = true           # hide when another window takes the focus
+                              # (not another quake window: they hide when
+                              # the focus leaves them all)
 always-on-top = true
 taskbar = false               # show in the taskbar and Alt+Tab (macOS: the
                               # Dock, read at start, and clicking it toggles;
@@ -278,6 +288,23 @@ autostart = true              # Windows and macOS: keep `jet quake` running,
                               # ~/Library/LaunchAgents/dev.jet.quake.plist)
                               # and by any jet window that finds it isn't
                               # (hidden until the hotkey)
+
+# More quake windows: [quake.NAME] tables, each one a window of its own
+# with [quake] under what it sets (all but autostart and hotkey-hook,
+# which are for every window). Windows that share a hotkey show and hide
+# together, focusing the one last used; `hotkey` can be a list, for one
+# that also has a key of its own. `jet quake NAME` toggles one, the tray
+# icon lists them. Windows only for now; elsewhere the first one is used.
+#
+# [quake.left]                # left and right drop together on ctrl+space
+# width = 0.3
+# height = 1.0
+# profile = "work"
+# [quake.right]
+# x = 0.7
+# width = 0.3
+# height = 1.0
+# hotkey = ["ctrl+space", "ctrl+alt+r"]
 
 # Ghostty's chord and action names, so `keybind = ...` lines carry over.
 # Modifiers: ctrl, shift, alt (opt), super (cmd, win). Keys: a-z, 0-9,

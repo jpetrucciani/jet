@@ -66,7 +66,7 @@ fn appearance(theme: Option<winit::window::Theme>) -> jet_config::Appearance {
 }
 
 fn run_loop(quake: bool, background: bool, first: First) -> Result<(), BoxError> {
-    let settings = ConfigFile::load();
+    let settings = ConfigFile::load(quake.then_some(None));
     let start = Start::new(&settings.config, quake, first);
     let mut builder = EventLoop::<Wake>::with_user_event();
     #[cfg(target_os = "linux")]
@@ -150,7 +150,11 @@ impl Winit {
         #[cfg(target_os = "macos")]
         {
             self.hotkey = None;
-            match quake::mac::Hotkey::register(&quake.hotkey, self.waker(Wake::Quake)) {
+            // One window and one chord here: the first of each.
+            let Some(chord) = quake.hotkey.0.first() else {
+                return None;
+            };
+            match quake::mac::Hotkey::register(chord, self.waker(Wake::Quake)) {
                 Ok(hotkey) => self.hotkey = Some(hotkey),
                 Err(problem) => return Some(problem),
             }
@@ -329,7 +333,10 @@ struct Handler {
 
 impl Handler {
     fn open(&mut self, event_loop: &ActiveEventLoop) -> Result<App<Winit>, BoxError> {
-        let settings = self.settings.take().unwrap_or_else(ConfigFile::load);
+        let settings = self
+            .settings
+            .take()
+            .unwrap_or_else(|| ConfigFile::load(None));
         let quake = self.quake;
         // The quake window is borderless, and shown once placed.
         let decorations = if quake {

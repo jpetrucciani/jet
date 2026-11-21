@@ -46,8 +46,11 @@ jet's own renderer, windowing and app shell.
 - **Quake window:** a global hotkey (`ctrl+space`, `ctrl+grave` on macOS)
   drops a window from any edge or fraction of the screen. Drag it by the
   tab bar or size it from an edge and it comes back there for the session.
-  On Windows it starts at sign-in by default, with its own profile,
-  optionally over the taskbar.
+  On Windows it starts at sign-in by default, with its own profile and a
+  tray icon, optionally over the taskbar, and works over games that turn
+  hotkeys off (`hotkey-hook`). There can be several (`[quake.NAME]`, on
+  Windows), each with its own place, profile and hotkeys: ones sharing a
+  hotkey drop together, like a terminal on each side of the screen.
 - **Session restore**, desktop **notifications** (OSC 9/777), taskbar
   **progress** (OSC 9;4), **clipboard writes** (OSC 52, never reads),
   hyperlinks (OSC 8).
@@ -111,7 +114,8 @@ the system's editor), starting a missing one as that file commented out, and
 **Choose theme** previews themes as you move and writes the one you pick.
 
 `jet [DIR] [--profile NAME] [-e COMMAND ARGS...]` opens a window there or
-running that; `jet quake` the drop-down window.
+running that; `jet quake [NAME]` toggles the drop-down window (or one of
+them).
 
 ```toml
 include = ["local.toml"] # per-machine overrides; fine if missing

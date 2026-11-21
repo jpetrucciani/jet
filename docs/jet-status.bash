@@ -41,8 +41,8 @@ __jet_b64() {
     b=0 c=0
     ((i + 1 < n)) && printf -v b %d "'${s:i+1:1}"
     ((i + 2 < n)) && printf -v c %d "'${s:i+2:1}"
-    out+=${t:a>>2:1}${t:((a&3)<<4)|(b>>4):1}
-    if ((i + 1 < n)); then out+=${t:((b&15)<<2)|(c>>6):1}; else out+='='; fi
+    out+=${t:a>>2:1}${t:((a & 3) << 4)|(b >> 4):1}
+    if ((i + 1 < n)); then out+=${t:((b & 15) << 2)|(c >> 6):1}; else out+='='; fi
     if ((i + 2 < n)); then out+=${t:c&63:1}; else out+='='; fi
   done
   __jet_b64s[$1]=$out
@@ -68,8 +68,8 @@ __jet_git() {
   done
   read -r head <"$g/HEAD" 2>/dev/null || return
   case $head in
-    "ref: refs/heads/"*) JET_STATUS[git]=${head#ref: refs/heads/} ;;
-    *) JET_STATUS[git]=${head:0:7} ;;
+  "ref: refs/heads/"*) JET_STATUS[git]=${head#ref: refs/heads/} ;;
+  *) JET_STATUS[git]=${head:0:7} ;;
   esac
   if [[ -d $g/rebase-merge ]]; then
     read -r n <"$g/rebase-merge/msgnum" && read -r m <"$g/rebase-merge/end"
@@ -126,8 +126,8 @@ __jet_k8s() {
         name='' ns=''
       fi
       case $k in
-        name) name=$v ;;
-        namespace) ns=$v ;;
+      name) name=$v ;;
+      namespace) ns=$v ;;
       esac
     done
   done
@@ -178,14 +178,14 @@ __jet_status() {
   fi
 
   case $rc in
-    0) rc='' ;;
-    130) rc="130 INT" ;;
-    131) rc="131 QUIT" ;;
-    134) rc="134 ABRT" ;;
-    137) rc="137 KILL" ;;
-    139) rc="139 SEGV" ;;
-    141) rc="141 PIPE" ;;
-    143) rc="143 TERM" ;;
+  0) rc='' ;;
+  130) rc="130 INT" ;;
+  131) rc="131 QUIT" ;;
+  134) rc="134 ABRT" ;;
+  137) rc="137 KILL" ;;
+  139) rc="139 SEGV" ;;
+  141) rc="141 PIPE" ;;
+  143) rc="143 TERM" ;;
   esac
   JET_STATUS[rc]=$rc
 

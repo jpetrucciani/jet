@@ -60,12 +60,17 @@ pub struct Config {
     include: Vec<String>,
 }
 
-/// `jet quake`: a window a global hotkey shows and hides.
+/// `jet quake`: a window a global hotkey shows and hides. `[quake.NAME]`
+/// tables make several, each with `[quake]` under what it sets.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+#[serde(default, rename_all = "kebab-case")]
 pub struct Quake {
-    /// A chord in keybind syntax, e.g. `"ctrl+grave"`.
-    pub hotkey: String,
+    /// Chords in keybind syntax, e.g. `"ctrl+grave"`. Windows sharing one
+    /// show and hide together.
+    pub hotkey: Chords,
+    /// Windows: catch the hotkey with a low-level keyboard hook too, so it
+    /// works over games that turn hotkeys off while in front.
+    pub hotkey_hook: bool,
     pub monitor: Monitor,
     /// Where on the monitor, as fractions of its work area (the screen
     /// less the taskbar): the left third is `width = 0.333`.
@@ -86,6 +91,110 @@ pub struct Quake {
     /// Windows and macOS: keep `jet quake` running, started at sign-in and by any jet
     /// window that finds it isn't.
     pub autostart: bool,
+    /// `[quake.NAME]`: the quake windows, when more than `[quake]` itself.
+    /// Unknown keys land here too, refused for not being tables.
+    #[serde(flatten)]
+    pub windows: BTreeMap<String, QuakeTable>,
+}
+
+/// Settings only `[quake]` has, for every quake window at once.
+const QUAKE_ONLY: [&str; 2] = ["autostart", "hotkey-hook"];
+
+impl Quake {
+    /// The quake windows, in name order: each `[quake.NAME]` over
+    /// `[quake]`, else `[quake]` alone, unnamed.
+    pub fn resolve(&self) -> Result<Vec<(Option<String>, Quake)>, String> {
+        if let Some(key) = self
+            .windows
+            .iter()
+            .find_map(|(k, v)| (!v.0.is_table()).then_some(k))
+        {
+            return Err(format!("quake.{key} isn't a quake setting"));
+        }
+        if self.windows.is_empty() {
+            return Ok(vec![(None, self.clone())]);
+        }
+        let base = Quake {
+            windows: BTreeMap::new(),
+            ..self.clone()
+        };
+        let base = Table::try_from(&base).map_err(|e| format!("quake: {e}"))?;
+        let mut windows = Vec::new();
+        for (name, QuakeTable(own)) in &self.windows {
+            let at = |what: String| format!("quake.{name}: {what}");
+            let Some(own) = own.as_table() else {
+                continue;
+            };
+            if let Some(key) = own.keys().find(|k| QUAKE_ONLY.contains(&k.as_str())) {
+                return Err(at(format!("{key} is for [quake], every window at once")));
+            }
+            if let Some(key) = own.iter().find_map(|(k, v)| v.is_table().then_some(k)) {
+                return Err(at(format!("{key} isn't a quake setting")));
+            }
+            let mut table = base.clone();
+            table.extend(own.clone());
+            let window: Quake = Value::Table(table)
+                .try_into()
+                .map_err(|e: toml::de::Error| at(e.message().to_owned()))?;
+            windows.push((Some(name.clone()), window));
+        }
+        Ok(windows)
+    }
+
+    /// Window `name`'s settings, or with `None` the first window's; `None`
+    /// if there's no such window (or the config doesn't resolve, which
+    /// loading already refused).
+    pub fn window(&self, name: Option<&str>) -> Option<Quake> {
+        let windows = self.resolve().ok()?;
+        match name {
+            None => windows.into_iter().next().map(|(_, q)| q),
+            Some(name) => windows
+                .into_iter()
+                .find(|(n, _)| n.as_deref() == Some(name))
+                .map(|(_, q)| q),
+        }
+    }
+}
+
+/// A `[quake.NAME]` table as written: `[quake]` fills in the rest. Any
+/// other value is a key `[quake]` doesn't have, refused by
+/// [`Quake::resolve`] with its name (here it would come without).
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct QuakeTable(pub Value);
+
+/// One chord or several: `"ctrl+space"` or `["ctrl+space", "ctrl+alt+1"]`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Chords(pub Vec<String>);
+
+impl From<&str> for Chords {
+    fn from(chord: &str) -> Self {
+        Self(vec![chord.to_owned()])
+    }
+}
+
+impl Serialize for Chords {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self.0.as_slice() {
+            [one] => s.serialize_str(one),
+            many => many.serialize(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Chords {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum OneOrMany {
+            One(String),
+            Many(Vec<String>),
+        }
+        Ok(Self(match OneOrMany::deserialize(d)? {
+            OneOrMany::One(one) => vec![one],
+            OneOrMany::Many(many) => many,
+        }))
+    }
 }
 
 impl Default for Quake {
@@ -98,6 +207,7 @@ impl Default for Quake {
                 "ctrl+space"
             }
             .into(),
+            hotkey_hook: false,
             monitor: Monitor::Cursor,
             x: 0.0,
             y: 0.0,
@@ -109,6 +219,7 @@ impl Default for Quake {
             over_taskbar: false,
             profile: None,
             autostart: true,
+            windows: BTreeMap::new(),
         }
     }
 }
@@ -1189,6 +1300,17 @@ fn theme_under(
     Ok(())
 }
 
+/// `key` names profile `name` for first tabs: it must be a plain one.
+fn check_default(config: &Config, key: &str, name: &str) -> Result<(), Error> {
+    match config.profiles.get(name) {
+        None => Err(Error(format!("{key}: there's no [profiles.{name}]"))),
+        Some(p) if p.jetmux.is_some() => Err(Error(format!(
+            "{key}: {name} is a jetmux session, which can't be a default shell"
+        ))),
+        Some(_) => Ok(()),
+    }
+}
+
 fn check(config: &Config) -> Result<(), Error> {
     let profiles = config
         .profiles
@@ -1233,39 +1355,41 @@ fn check(config: &Config) -> Result<(), Error> {
     {
         return Err(Error(format!("hosts.{name}: needs a match regex")));
     }
-    let quake = &config.quake;
-    if keybinds::parse_chord(&quake.hotkey).is_none() {
-        return Err(Error(format!(
-            "quake.hotkey: {:?} isn't a key chord",
-            quake.hotkey
-        )));
+    let quakes = config.quake.resolve().map_err(Error)?;
+    for (name, quake) in &quakes {
+        let at = name
+            .as_ref()
+            .map_or("quake".to_owned(), |n| format!("quake.{n}"));
+        if let Some(chord) = quake
+            .hotkey
+            .0
+            .iter()
+            .find(|c| keybinds::parse_chord(c).is_none())
+        {
+            return Err(Error(format!("{at}.hotkey: {chord:?} isn't a key chord")));
+        }
+        if let Some(name) = &quake.profile {
+            check_default(config, &format!("{at}.profile"), name)?;
+        }
+        let fits = |start: f32, len: f32| len > 0.0 && start >= 0.0 && start + len <= 1.001;
+        if !fits(quake.x, quake.width) || !fits(quake.y, quake.height) {
+            return Err(Error(format!(
+                "{at}: x, y, width and height are fractions of the screen, and must fit on it"
+            )));
+        }
     }
     let defaults = [
-        ("quake.profile", &quake.profile),
         ("window.profile", &config.window.profile),
         ("shell.profile", &config.shell.profile),
     ];
     for (key, name) in defaults {
-        let Some(name) = name else { continue };
-        match config.profiles.get(name) {
-            None => return Err(Error(format!("{key}: there's no [profiles.{name}]"))),
-            Some(p) if p.jetmux.is_some() => {
-                return Err(Error(format!(
-                    "{key}: {name} is a jetmux session, which can't be a default shell"
-                )));
-            }
-            Some(_) => {}
+        if let Some(name) = name {
+            check_default(config, key, name)?;
         }
     }
     if !(0.0..=1.0).contains(&config.window.unfocused_split_opacity) {
         return Err(Error(
             "window.unfocused-split-opacity must be between 0 and 1".into(),
-        ));
-    }
-    let fits = |start: f32, len: f32| len > 0.0 && start >= 0.0 && start + len <= 1.001;
-    if !fits(quake.x, quake.width) || !fits(quake.y, quake.height) {
-        return Err(Error(
-            "quake: x, y, width and height are fractions of the screen, and must fit on it".into(),
         ));
     }
     if !(0.0..=1.0).contains(&config.window.opacity) {
@@ -1945,7 +2069,7 @@ mod tests {
         assert_eq!(c.tab_bar.width, 30);
         assert!(c.tab_bar.active_background.is_some() && c.tab_bar.foreground.is_none());
         assert_eq!(c.profiles["pwsh"].icon, Some(Icon::Text("⚡".into())));
-        assert_eq!(c.quake.hotkey, "ctrl+grave");
+        assert_eq!(c.quake.hotkey, "ctrl+grave".into());
         assert_eq!((c.quake.width, c.quake.y), (0.333, 0.0));
         assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
         Ok(())
@@ -1963,6 +2087,28 @@ mod tests {
         assert!(profile.is_some_and(|e| e.contains("[profiles.pwsh]")));
         let off_screen = parse("[quake]\nx = 0.8\nwidth = 0.5\n").err();
         assert!(off_screen.is_some_and(|e| e.contains("must fit")));
+    }
+
+    #[test]
+    fn named_quakes_inherit_quake_and_can_share_a_hotkey() -> Result<(), String> {
+        let text = "[quake]\nheight = 1.0\n[quake.left]\nwidth = 0.3\n\
+                    [quake.right]\nx = 0.7\nwidth = 0.3\nhotkey = [\"ctrl+space\", \"f9\"]\n";
+        let quakes = parse(text)?.config.quake.resolve()?;
+        let [(Some(left), l), (Some(right), r)] = quakes.as_slice() else {
+            return Err(format!("{quakes:?}"));
+        };
+        assert_eq!((left.as_str(), right.as_str()), ("left", "right"));
+        assert_eq!((l.x, l.width, l.height), (0.0, 0.3, 1.0));
+        assert_eq!((r.x, r.height), (0.7, 1.0));
+        assert_eq!(l.hotkey, "ctrl+space".into());
+        assert_eq!(r.hotkey.0, ["ctrl+space", "f9"]);
+        let typo = parse("[quake]\nhieght = 1.0\n").err().unwrap_or_default();
+        assert!(typo.contains("hieght"), "{typo}");
+        let only = parse("[quake.left]\nautostart = false\n").err();
+        assert!(only.is_some_and(|e| e.contains("quake.left: autostart is for [quake]")));
+        let off = parse("[quake.left]\nx = 0.9\n").err();
+        assert!(off.is_some_and(|e| e.contains("quake.left: x, y")));
+        Ok(())
     }
 
     #[test]

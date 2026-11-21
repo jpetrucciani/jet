@@ -2,6 +2,12 @@
 
 What changed in each release of jet and jetmux, newest first. Link to a version by its heading, dots dropped: `CHANGELOG.md#011` is [0.1.1](#011). A release's GitHub notes start with its section here.
 
+## 0.1.6
+
+- Windows: several quake windows. Each `[quake.NAME]` is a window of its own, with its own place, profile and hotkeys, and `[quake]` under it; windows sharing a hotkey show and hide together, so one key can drop a terminal on each side of the screen. `jet quake` is now a small process holding the hotkeys and the one tray icon, which lists the windows, and starting a process for each.
+- Windows: `[quake] hotkey-hook = true` catches the quake hotkey with a keyboard hook as well, so it works in games that turn hotkeys off while they're in front, such as League of Legends.
+- Windows: the quake window no longer flashes and hides when it comes forward a moment after the hotkey (in a game, with `hotkey-hook`).
+
 ## 0.1.5
 
 - macOS: jet no longer hangs on opening when no `jet quake` is running. Starting the quake window for `[quake] autostart`, it asked every running jet whether it was the quake window, itself included, and waited forever for its own answer.

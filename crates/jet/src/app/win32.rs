@@ -70,13 +70,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL, SWP_FRAMECHANGED, SWP_NOACTIVATE,
     SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetCursor, SetForegroundWindow, SetTimer,
     SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage, WINDOW_EX_STYLE,
-    WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND,
-    WM_EXITSIZEMOVE, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
-    WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST,
-    WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE,
-    WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR,
-    WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSEXW, WS_CAPTION,
-    WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_THICKFRAME,
+    WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COPYDATA, WM_DESTROY, WM_DPICHANGED,
+    WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCACTIVATE, WM_NCCALCSIZE,
+    WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_NCLBUTTONDOWN, WM_NCLBUTTONUP, WM_NCMOUSELEAVE,
+    WM_NCMOUSEMOVE, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE,
+    WM_SIZE, WM_SYSCHAR, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSEXW,
+    WS_CAPTION, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_THICKFRAME,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -138,7 +138,7 @@ const WM_APP_NOTIFY: u32 = WM_APP + 10;
 /// The tray icon carrying notifications; quake's own is 1.
 const NOTIFY_ICON: u32 = 2;
 /// `MAKEINTRESOURCE(1)`: the icon in `assets/jet.rc`.
-const ICON: PCWSTR = PCWSTR(std::ptr::without_provenance(1));
+pub(crate) const ICON: PCWSTR = PCWSTR(std::ptr::without_provenance(1));
 /// Wheel units per notch.
 const WHEEL_DELTA: i32 = 120;
 const CF_UNICODETEXT: u32 = 13;
@@ -318,10 +318,11 @@ impl Host for Win32 {
         }
     }
 
-    fn reconfigure_quake(&mut self, config: &jet_config::Quake) -> Option<String> {
+    fn reconfigure_quake(&mut self, _config: &jet_config::Quake) -> Option<String> {
         let window = self.quake.as_mut()?;
         window.moved = None;
-        let problem = window.register(&config.hotkey).err();
+        // The hotkeys are the coordinator's, which says when they change.
+        let problem = window.problem.clone();
         self.post(quake::WM_APP_PLACE);
         problem
     }
@@ -459,7 +460,7 @@ impl Host for Win32 {
 /// A terminal window, or with `quake` the hotkey-toggled one.
 /// `background`: started by autostart, so hidden until the hotkey even when
 /// the hotkey can't be had, and gone if a quake is already running.
-pub fn run(quake: bool, background: bool, first: First) -> ExitCode {
+pub fn run(quake: Option<Option<String>>, background: bool, first: First) -> ExitCode {
     match run_window(quake, background, first) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
@@ -469,17 +470,25 @@ pub fn run(quake: bool, background: bool, first: First) -> ExitCode {
     }
 }
 
-fn run_window(quake: bool, background: bool, first: First) -> Result<(), BoxError> {
-    // One quake: another toggles it, or leaves it be from autostart.
-    let _claim = match quake.then(quake::Claim::take) {
-        Some(None) => {
-            if !background {
-                quake::signal_running();
-            }
-            return Ok(());
-        }
-        claim => claim.flatten(),
+/// With `quake`, quake window `NAME` (`None`: `[quake]` alone), which
+/// the coordinator started.
+fn run_window(
+    quake_window: Option<Option<String>>,
+    background: bool,
+    first: First,
+) -> Result<(), BoxError> {
+    // One process per quake window: the coordinator starts each once.
+    let _claim = match &quake_window {
+        Some(name) => match quake::Claim::take(Some(name.as_deref())) {
+            Some(claim) => Some(claim),
+            None => return Ok(()),
+        },
+        None => None,
     };
+    let quake = quake_window.is_some();
+    let quake_class = quake_window
+        .as_ref()
+        .map(|n| quake::window_class(n.as_deref()));
     // For the taskbar button's progress (ITaskbarList3). Without it that's
     // all that's lost.
     let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
@@ -495,7 +504,10 @@ fn run_window(quake: bool, background: bool, first: First) -> Result<(), BoxErro
         // Windows picks the small size from the same icon. A missing icon
         // only costs the default one.
         hIcon: unsafe { LoadIconW(Some(instance), ICON) }.unwrap_or_default(),
-        lpszClassName: if quake { quake::CLASS } else { w!("jet") },
+        lpszClassName: match &quake_class {
+            Some(class) => PCWSTR(class.as_ptr()),
+            None => w!("jet"),
+        },
         ..Default::default()
     };
     if unsafe { RegisterClassExW(&class) } == 0 {
@@ -527,7 +539,7 @@ fn run_window(quake: bool, background: bool, first: First) -> Result<(), BoxErro
         )?
     };
 
-    let settings = ConfigFile::load();
+    let settings = ConfigFile::load(quake_window.clone());
     // Before the GPU: the shell's startup overlaps it.
     let start = Start::new(&settings.config, quake, first);
     // Fixed for the window's life: an opacity edit that crosses 1, or a
@@ -546,7 +558,7 @@ fn run_window(quake: bool, background: bool, first: First) -> Result<(), BoxErro
     };
     let host = Win32 {
         hwnd,
-        quake: quake.then(|| QuakeWindow::new(hwnd, class.hIcon)),
+        quake: quake.then(QuakeWindow::new),
         taskbar: Taskbar::new(),
         vblank: paced.then(|| Vblank::start(hwnd)).flatten(),
         later: Vec::new(),
@@ -564,13 +576,8 @@ fn run_window(quake: bool, background: bool, first: First) -> Result<(), BoxErro
         let on = app.settings.config.quake.autostart;
         app.host.autostart(on);
     }
-    // Shown at once when the hotkey can't be had, to say so.
-    let mut show_quake = false;
-    if let Some(window) = &app.host.quake {
-        app.hotkey_problem = window.register(&app.settings.config.quake.hotkey).err();
-        show_quake = app.hotkey_problem.is_some() && !background;
-        app.refresh_banner();
-    }
+    // Started for a toggle, not ahead of one.
+    let show_quake = quake && !background;
     let size = if quake {
         None
     } else {
@@ -594,6 +601,9 @@ fn run_window(quake: bool, background: bool, first: First) -> Result<(), BoxErro
         } else if show_quake {
             quake::show(hwnd, &placed, None, true);
         }
+    }
+    if quake {
+        QuakeWindow::ready(hwnd);
     }
 
     let mut msg = MSG::default();
@@ -758,14 +768,45 @@ impl App<Win32> {
             // so do we; Windows still draws the caption.
             WM_NCACTIVATE => {
                 self.set_focus(wparam.0 != 0);
-                if wparam.0 == 0
-                    && self.host.quake.is_some()
-                    && self.settings.config.quake.hide_on_blur
-                {
-                    // Hiding sends messages; not from in here.
-                    self.host.post(quake::WM_APP_HIDE);
+                if wparam.0 == 0 && self.host.quake.is_some() {
+                    // Hiding sends messages; not from in here. And the
+                    // new window in front isn't known yet.
+                    self.host.post(quake::WM_APP_BLUR);
                 }
                 return After::Default;
+            }
+            quake::WM_APP_BLUR if self.host.quake.is_some() => {
+                let hide_on_blur = self.settings.config.quake.hide_on_blur;
+                if QuakeWindow::blurred(self.host.hwnd, hide_on_blur) {
+                    return After::Then(Box::new(quake::hide));
+                }
+            }
+            quake::WM_APP_SHOW if self.host.quake.is_some() => {
+                if self.tabs.is_empty() {
+                    self.new_tab(None);
+                }
+                let activate = wparam.0 != 0;
+                let placed = self.settings.config.quake.clone();
+                let moved = self.host.quake.as_ref().and_then(|window| window.moved);
+                return After::Then(Box::new(move |hwnd| {
+                    quake::show(hwnd, &placed, moved, activate)
+                }));
+            }
+            WM_COPYDATA if self.host.quake.is_some() => {
+                // SAFETY: a WM_COPYDATA's lparam, used in this handler only.
+                if let Some((quake::COPY_PROBLEM, text)) = unsafe { quake::copied(lparam) } {
+                    let problem =
+                        (!text.is_empty()).then(|| String::from_utf8_lossy(text).into_owned());
+                    if let Some(window) = &mut self.host.quake {
+                        window.problem.clone_from(&problem);
+                    }
+                    if problem != self.hotkey_problem {
+                        self.hotkey_problem = problem;
+                        self.refresh_banner();
+                        self.render();
+                    }
+                }
+                return After::Result(1);
             }
             WM_TIMER => {
                 if let Some(timer) = TIMERS.iter().find(|t| timer_id(**t) == wparam.0) {
@@ -788,7 +829,7 @@ impl App<Win32> {
                     }
                 }
             }
-            WM_HOTKEY | quake::WM_APP_TOGGLE => return self.toggle_quake(),
+            quake::WM_APP_TOGGLE => return self.toggle_quake(),
             WM_CLOSE | quake::WM_APP_HIDE if self.host.quake.is_some() => {
                 return After::Then(Box::new(quake::hide));
             }
@@ -816,21 +857,6 @@ impl App<Win32> {
                 NIN_BALLOONTIMEOUT | NIN_BALLOONHIDE => self.host.end_notification(),
                 _ => {}
             },
-            quake::WM_APP_TRAY => match (lparam.0 & 0xFFFF) as u32 {
-                WM_LBUTTONUP => return self.toggle_quake(),
-                WM_RBUTTONUP => return After::Then(Box::new(quake::tray_menu)),
-                _ => {}
-            },
-            msg if self
-                .host
-                .quake
-                .as_ref()
-                .is_some_and(|q| q.taskbar_created == msg) =>
-            {
-                if let Some(quake) = &self.host.quake {
-                    quake.add_tray_icon();
-                }
-            }
             _ => return After::Default,
         }
         After::Nothing

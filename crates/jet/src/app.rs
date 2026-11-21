@@ -209,20 +209,24 @@ enum Pointer {
 }
 
 /// The settings in effect and the files they came from.
-struct ConfigFile {
+pub(crate) struct ConfigFile {
     dirs: jet_config::Dirs,
+    /// The quake window this is (`Some(None)`: the unnamed or first one):
+    /// `config.quake` is that window's settings alone.
+    quake: Option<Option<String>>,
     /// Files whose edits mean a reload, and their last modification times.
     watched: Vec<PathBuf>,
     stamps: Vec<Option<SystemTime>>,
-    config: Config,
+    pub(crate) config: Config,
     /// Why the files on disk didn't load, shown in the window.
     error: Option<String>,
 }
 
 impl ConfigFile {
-    fn load() -> Self {
+    pub(crate) fn load(quake: Option<Option<String>>) -> Self {
         let mut file = Self {
             dirs: jet_config::Dirs::from_env(),
+            quake,
             watched: Vec::new(),
             stamps: Vec::new(),
             config: Config::default(),
@@ -236,7 +240,7 @@ impl ConfigFile {
 
     /// The new config if any watched file changed, appeared or went away.
     /// One that doesn't load keeps the config in effect.
-    fn reload(&mut self, force: bool) -> Option<Config> {
+    pub(crate) fn reload(&mut self, force: bool) -> Option<Config> {
         if !force && jet_config::stamps(&self.watched) == self.stamps {
             return None;
         }
@@ -269,7 +273,15 @@ impl ConfigFile {
                     eprintln!("jet: {warning}");
                 }
                 self.error = None;
-                Some(loaded.config)
+                let mut config = loaded.config;
+                let window = self
+                    .quake
+                    .as_ref()
+                    .map(|n| config.quake.window(n.as_deref()));
+                if let Some(Some(quake)) = window {
+                    config.quake = quake;
+                }
+                Some(config)
             }
             Err(err) => {
                 eprintln!("jet: {err}");
