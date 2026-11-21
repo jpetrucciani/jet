@@ -151,9 +151,7 @@ impl Winit {
         {
             self.hotkey = None;
             // One window and one chord here: the first of each.
-            let Some(chord) = quake.hotkey.0.first() else {
-                return None;
-            };
+            let chord = quake.hotkey.0.first()?;
             match quake::mac::Hotkey::register(chord, self.waker(Wake::Quake)) {
                 Ok(hotkey) => self.hotkey = Some(hotkey),
                 Err(problem) => return Some(problem),
