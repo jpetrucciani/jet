@@ -411,6 +411,9 @@ struct App<H: Host> {
     font_delta: f32,
     /// Why the configured font couldn't be used.
     font_problem: Option<String>,
+    /// Why a configured sound file can't be played.
+    sound_problem: Option<String>,
+    sounds: crate::sound::Sounds,
     /// Why the quake hotkey couldn't be registered.
     hotkey_problem: Option<String>,
     /// Problem rows drawn over the top of the focused pane, until fixed or
@@ -597,6 +600,7 @@ impl<H: Host> App<H> {
         let renderer = make_renderer(&gpu, view_format, dpi, config_now, fonts);
         let bindings = config_now.bindings().unwrap_or_default();
         let (local_user, local_host) = local_names();
+        let sound_problem = crate::sound::problems(&settings.config);
         let mut app = Self {
             host,
             settings,
@@ -608,6 +612,8 @@ impl<H: Host> App<H> {
             renderer,
             font_delta: 0.0,
             font_problem,
+            sound_problem,
+            sounds: crate::sound::Sounds::default(),
             hotkey_problem: None,
             banner: Vec::new(),
             banner_dismissed: false,
@@ -811,7 +817,8 @@ impl<H: Host> App<H> {
                         dirty = true;
                     }
                     PaneEvent::Bell => {
-                        self.bell();
+                        let profile = self.panes.get(&id).and_then(|s| s.profile.clone());
+                        self.bell(profile.as_deref());
                         self.emit(What::Bell, Some(id));
                     }
                     PaneEvent::Notify(note) => {
@@ -825,6 +832,13 @@ impl<H: Host> App<H> {
                         };
                         if self.settings.config.terminal.notifications && show {
                             self.host.notify(&note.title, &note.body);
+                        }
+                        if show {
+                            let profile = self.panes.get(&id).and_then(|s| s.profile.as_deref());
+                            let config = &self.settings.config;
+                            if let Some(sound) = config.sound_for(profile, true) {
+                                self.sounds.play(sound, config.terminal.sound_volume);
+                            }
                         }
                         let (title, body) = (note.title, note.body);
                         self.emit(What::Notification { title, body }, Some(id));
@@ -2382,6 +2396,7 @@ impl<H: Host> App<H> {
         let problems: Vec<&str> = [
             &self.settings.error,
             &self.font_problem,
+            &self.sound_problem,
             &self.hotkey_problem,
             &self.remote_problem,
         ]
@@ -2458,6 +2473,12 @@ impl<H: Host> App<H> {
         let ids: Vec<PaneId> = self.panes.keys().copied().collect();
         for id in ids {
             self.refresh_host(id);
+        }
+        let sound_problem = crate::sound::problems(&self.settings.config);
+        if sound_problem != self.sound_problem {
+            self.sound_problem = sound_problem;
+            self.banner_dismissed = false;
+            self.refresh_banner();
         }
         self.render();
     }
@@ -4178,16 +4199,24 @@ impl<H: Host> App<H> {
 
     /// In front: a brief white wash. Behind: flash the taskbar button until
     /// the window is brought back.
-    fn bell(&mut self) {
+    /// The bell, from a pane of profile `profile`.
+    fn bell(&mut self, profile: Option<&str>) {
         let now = Instant::now();
         if self.last_bell.is_some_and(|t| now - t < BELL_GAP) {
             return;
         }
         self.last_bell = Some(now);
-        let bell = &self.settings.config.terminal.bell;
+        let config = &self.settings.config;
+        let bell = &config.terminal.bell;
         let (flash, attention) = (bell.contains(&Bell::Flash), bell.contains(&Bell::Attention));
-        if bell.contains(&Bell::Sound) {
-            self.host.beep();
+        // A sound file set turns sound on; one that's missing still beeps.
+        match config.sound_for(profile, false) {
+            Some(sound) if sound.is_file() => {
+                self.sounds.play(sound, config.terminal.sound_volume);
+            }
+            Some(_) => self.host.beep(),
+            None if bell.contains(&Bell::Sound) => self.host.beep(),
+            None => {}
         }
         if self.focused && flash {
             self.renderer.set_flash(Some(FLASH));

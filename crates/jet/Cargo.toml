@@ -14,12 +14,16 @@ jet-render.workspace = true
 jetmux-proto = { path = "../jetmux-proto" }
 libghostty-vt.workspace = true
 resvg.workspace = true
+rodio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 wgpu.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true
+
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+rodio = { workspace = true, features = ["playback"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 arboard.workspace = true

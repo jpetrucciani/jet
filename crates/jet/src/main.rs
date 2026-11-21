@@ -26,6 +26,7 @@ mod quake;
 mod remote;
 #[cfg(any(windows, target_os = "linux", target_os = "macos", test))]
 mod session;
+mod sound;
 #[cfg(any(windows, target_os = "linux", target_os = "macos", test))]
 mod status;
 #[cfg(windows)]

@@ -22,6 +22,9 @@ jet-font = { path = "crates/jet-font" }
 jet-pty = { path = "crates/jet-pty" }
 jet-render = { path = "crates/jet-render" }
 libc = "0.2"
+# Bell and notification sounds: decoding everywhere, playback (cpal) on
+# Windows and macOS. Linux plays through ALSA, dlopened (see sound.rs).
+rodio = { version = "0.23", default-features = false, features = ["flac", "mp3", "vorbis", "wav"] }
 libghostty-vt = "0.2.2"
 png = "0.18"
 regex = "1"

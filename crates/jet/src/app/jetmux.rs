@@ -97,7 +97,7 @@ impl<H: Host> App<H> {
                             eprintln!("jet: copying to the clipboard: {err}");
                         }
                     }
-                    SessionEvent::Bell => self.bell(),
+                    SessionEvent::Bell => self.bell(None),
                     SessionEvent::Message(text) => eprintln!("jet: jetmux: {text}"),
                     SessionEvent::Ended(why) => {
                         self.end_remote(key, why);

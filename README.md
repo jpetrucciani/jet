@@ -51,6 +51,9 @@ jet's own renderer, windowing and app shell.
   hotkeys off (`hotkey-hook`). There can be several (`[quake.NAME]`, on
   Windows), each with its own place, profile and hotkeys: ones sharing a
   hotkey drop together, like a terminal on each side of the screen.
+- **Bell and notification sounds:** a wav, mp3, ogg or flac for the bell
+  and another for notifications, per profile too, so an agent (Claude
+  Code, Codex) ringing for you can sound like itself.
 - **Session restore**, desktop **notifications** (OSC 9/777), taskbar
   **progress** (OSC 9;4), **clipboard writes** (OSC 52, never reads),
   hyperlinks (OSC 8).

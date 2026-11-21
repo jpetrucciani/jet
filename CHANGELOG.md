@@ -2,6 +2,10 @@
 
 What changed in each release of jet and jetmux, newest first. Link to a version by its heading, dots dropped: `CHANGELOG.md#011` is [0.1.1](#011). A release's GitHub notes start with its section here.
 
+## 0.1.7
+
+- Bell and notification sounds: `[terminal] bell-sound` plays a wav, mp3, ogg or flac file for the bell, `notification-sound` one for desktop notifications (OSC 9, OSC 777), at `sound-volume`. A profile can have its own of each, so an agent that rings for you (Claude Code's terminal bell, Codex's notifications) sounds like itself. A file that's missing or won't play is named in the window, and the bell falls back to the system alert. On Linux jet plays through ALSA, loaded when the first sound plays, so it still starts without it.
+
 ## 0.1.6
 
 - Windows: several quake windows. Each `[quake.NAME]` is a window of its own, with its own place, profile and hotkeys, and `[quake]` under it; windows sharing a hotkey show and hide together, so one key can drop a terminal on each side of the screen. `jet quake` is now a small process holding the hotkeys and the one tray icon, which lists the windows, and starting a process for each.

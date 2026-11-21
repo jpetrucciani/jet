@@ -134,6 +134,11 @@ integration = true            # bash (4+), zsh and PowerShell started in jet
 # tab-color = "#cc3333"            # its tabs, per [tab-bar] color-style
 # color-style = "fill"             # or its own, over [tab-bar]'s
 #
+# [profiles.claude]                # an agent that rings when it needs you
+# command = "claude"
+# bell-sound = "~/sounds/claude.ogg"        # its panes' sounds, over
+# notification-sound = "~/sounds/done.mp3"  # [terminal]'s
+#
 # [profiles.dev]                   # a jetmux session: its tabs and splits show
 # jetmux = { host = "voyager", session = "main", up = "dev" }
 #                                  # as jet's. host: over `ssh -T`, unset for
@@ -168,8 +173,19 @@ paste-protection = true       # ask before pasting a newline where it would
                               # a plain prompt)
 bell = ["flash", "attention"] # flash: the window, when it's in front;
                               # attention: the taskbar button (the Dock icon
-                              # bounces), when it isn't; sound: the system
-                              # alert (Windows only). [] ignores the bell
+                              # bounces), when it isn't; sound: bell-sound,
+                              # else the system alert (Windows only). []
+                              # ignores the bell
+# bell-sound = "~/sounds/ding.ogg" # a file the bell plays: wav, mp3, ogg or
+                              # flac; setting it turns sound on. `~/` and
+                              # paths next to this file work, and forward
+                              # slashes on Windows. Missing or unplayable,
+                              # the window says so and the system alert
+                              # plays. Linux plays through ALSA (libasound)
+# notification-sound = "~/sounds/chime.mp3" # what notifications (OSC 9,
+                              # OSC 777) play when they'd show, shown or not
+sound-volume = 1.0            # those sounds' volume, 0 to 1. A sound asked
+                              # for while one plays is skipped
 
 [cursor]
 style = "block"               # block | bar | underline

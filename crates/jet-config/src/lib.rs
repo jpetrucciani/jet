@@ -593,6 +593,9 @@ pub struct Profile {
     /// Show a jetmux session instead of running `command`: its tabs
     /// become tabs here, its splits drawn as jet's.
     pub jetmux: Option<Jetmux>,
+    /// Its panes' bell and notification sounds, over `[terminal]`'s.
+    pub bell_sound: Option<PathBuf>,
+    pub notification_sound: Option<PathBuf>,
 }
 
 /// A look for panes whose host (the status's `{host}`: where the shell
@@ -675,6 +678,14 @@ pub struct Terminal {
     pub paste_protection: bool,
     /// What the bell (`\a`) does; `[]` ignores it.
     pub bell: Vec<Bell>,
+    /// A sound file the bell plays (wav, mp3, ogg or flac): setting it
+    /// turns `sound` on. Missing or unplayable, the system alert plays.
+    pub bell_sound: Option<PathBuf>,
+    /// A sound file desktop notifications (OSC 9, OSC 777) play, whether
+    /// or not `notifications` shows them, when they'd show.
+    pub notification_sound: Option<PathBuf>,
+    /// Those sounds' volume, 0 to 1.
+    pub sound_volume: f32,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -684,7 +695,7 @@ pub enum Bell {
     Flash,
     /// Flash the taskbar button (bounce the Dock icon), when it isn't.
     Attention,
-    /// The system's alert sound (Windows only).
+    /// `bell-sound`, else the system's alert sound (Windows only).
     Sound,
 }
 
@@ -697,6 +708,9 @@ impl Default for Terminal {
             notifications: true,
             paste_protection: true,
             bell: vec![Bell::Flash, Bell::Attention],
+            bell_sound: None,
+            notification_sound: None,
+            sound_volume: 1.0,
         }
     }
 }
@@ -1081,6 +1095,75 @@ pub fn load_for_jetmux(dirs: &Dirs, own: &Path) -> Result<Loaded, Error> {
 }
 
 impl Config {
+    /// The sound files set, with where: `terminal.bell-sound`,
+    /// `profiles.NAME.notification-sound`.
+    pub fn sounds(&self) -> Vec<(String, &Path)> {
+        let terminal = &self.terminal;
+        let mut sounds = vec![
+            (
+                "terminal.bell-sound".to_owned(),
+                terminal.bell_sound.as_deref(),
+            ),
+            (
+                "terminal.notification-sound".to_owned(),
+                terminal.notification_sound.as_deref(),
+            ),
+        ];
+        for (name, p) in &self.profiles {
+            sounds.push((
+                format!("profiles.{name}.bell-sound"),
+                p.bell_sound.as_deref(),
+            ));
+            let key = format!("profiles.{name}.notification-sound");
+            sounds.push((key, p.notification_sound.as_deref()));
+        }
+        sounds
+            .into_iter()
+            .filter_map(|(k, p)| Some((k, p?)))
+            .collect()
+    }
+
+    fn sounds_mut(&mut self) -> Vec<(String, &mut PathBuf)> {
+        let terminal = &mut self.terminal;
+        let mut sounds = vec![
+            (
+                "terminal.bell-sound".to_owned(),
+                terminal.bell_sound.as_mut(),
+            ),
+            (
+                "terminal.notification-sound".to_owned(),
+                terminal.notification_sound.as_mut(),
+            ),
+        ];
+        for (name, p) in &mut self.profiles {
+            sounds.push((format!("profiles.{name}.bell-sound"), p.bell_sound.as_mut()));
+            let key = format!("profiles.{name}.notification-sound");
+            sounds.push((key, p.notification_sound.as_mut()));
+        }
+        sounds
+            .into_iter()
+            .filter_map(|(k, p)| Some((k, p?)))
+            .collect()
+    }
+
+    /// The sound a pane of profile `profile` plays for the bell, or with
+    /// `notification` for a notification: the profile's, else
+    /// `[terminal]`'s.
+    pub fn sound_for(&self, profile: Option<&str>, notification: bool) -> Option<&Path> {
+        let own = profile.and_then(|name| self.profiles.get(name));
+        let terminal = &self.terminal;
+        let (own, default) = if notification {
+            let own = own.and_then(|p| p.notification_sound.as_deref());
+            (own, terminal.notification_sound.as_deref())
+        } else {
+            (
+                own.and_then(|p| p.bell_sound.as_deref()),
+                terminal.bell_sound.as_deref(),
+            )
+        };
+        own.or(default)
+    }
+
     /// As TOML, every setting spelled out.
     pub fn to_toml(&self) -> Result<String, Error> {
         toml::to_string(self).map_err(|e| Error(e.to_string()))
@@ -1246,12 +1329,20 @@ fn resolve(
     let mut config: Config = Value::Table(merged)
         .try_into()
         .map_err(|e: toml::de::Error| Error(e.to_string()))?;
-    // Icon files resolve like other paths: `~/`, or next to the config.
+    // Icon and sound files resolve like other paths: `~/`, or next to the
+    // config.
     let dir = main.and_then(|(p, _)| p.parent());
     let icons = config.profiles.values_mut().map(|p| &mut p.icon);
     for icon in std::iter::once(&mut config.shell.icon).chain(icons) {
         if let Some(Icon::File(file)) = icon {
             *file = dirs.expand(&file.to_string_lossy(), dir);
+        }
+    }
+    for (key, sound) in config.sounds_mut() {
+        *sound = dirs.expand(&sound.to_string_lossy(), dir);
+        if !sound.is_file() {
+            let shown = sound.display();
+            loaded.warnings.push(format!("{key}: there's no {shown}"));
         }
     }
     check(&config)?;
@@ -1391,6 +1482,9 @@ fn check(config: &Config) -> Result<(), Error> {
         return Err(Error(
             "window.unfocused-split-opacity must be between 0 and 1".into(),
         ));
+    }
+    if !(0.0..=1.0).contains(&config.terminal.sound_volume) {
+        return Err(Error("terminal.sound-volume must be from 0 to 1".into()));
     }
     if !(0.0..=1.0).contains(&config.window.opacity) {
         return Err(Error("window.opacity must be from 0 to 1".into()));
@@ -2108,6 +2202,25 @@ mod tests {
         assert!(only.is_some_and(|e| e.contains("quake.left: autostart is for [quake]")));
         let off = parse("[quake.left]\nx = 0.9\n").err();
         assert!(off.is_some_and(|e| e.contains("quake.left: x, y")));
+        Ok(())
+    }
+
+    #[test]
+    fn sounds_come_from_the_profile_then_terminal_and_missing_ones_warn() -> Result<(), String> {
+        let text = "[terminal]\nbell-sound = \"nope.ogg\"\nnotification-sound = \"n.mp3\"\n\
+                    [profiles.claude]\nbell-sound = \"claude.wav\"\n";
+        let loaded = parse(text)?;
+        let c = &loaded.config;
+        let bell = |p| c.sound_for(p, false).map(|s| s.ends_with("claude.wav"));
+        assert_eq!(bell(Some("claude")), Some(true));
+        assert_eq!(bell(None), Some(false));
+        assert!(
+            c.sound_for(Some("claude"), true)
+                .is_some_and(|s| s.ends_with("n.mp3"))
+        );
+        let warned = |key: &str| loaded.warnings.iter().any(|w| w.starts_with(key));
+        assert!(warned("terminal.bell-sound: there's no") && warned("profiles.claude.bell-sound"));
+        assert!(parse("[terminal]\nsound-volume = 2.0\n").is_err());
         Ok(())
     }
 
