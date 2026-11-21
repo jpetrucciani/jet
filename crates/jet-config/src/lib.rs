@@ -2194,7 +2194,7 @@ mod tests {
         assert_eq!((left.as_str(), right.as_str()), ("left", "right"));
         assert_eq!((l.x, l.width, l.height), (0.0, 0.3, 1.0));
         assert_eq!((r.x, r.height), (0.7, 1.0));
-        assert_eq!(l.hotkey, "ctrl+space".into());
+        assert_eq!(l.hotkey, crate::Quake::default().hotkey);
         assert_eq!(r.hotkey.0, ["ctrl+space", "f9"]);
         let typo = parse("[quake]\nhieght = 1.0\n").err().unwrap_or_default();
         assert!(typo.contains("hieght"), "{typo}");
