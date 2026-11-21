@@ -304,12 +304,20 @@ let
   scripts = with pkgs; rec {
     check = pog {
       name = "check";
-      description = "fmt, clippy and tests for the linux build";
+      description = "fmt, clippy and tests for the linux build, and the release's license check";
       script = ''
         set -euo pipefail
         cargo fmt --all --check
         cargo clippy --all --benches --tests --examples --all-features -- -D warnings
         cargo test --all
+        # what dist's notices refuse, refused here first: a crate under a
+        # license about.toml doesn't take, on any target a release builds
+        for target in x86_64-unknown-linux-gnu ${winTarget} aarch64-apple-darwin; do
+          ${notices}/bin/notices --target "$target" -o /dev/null
+        done
+        for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin; do
+          ${notices}/bin/notices --workspace --target "$target" -o /dev/null
+        done
       '';
     };
     build_win = pog {

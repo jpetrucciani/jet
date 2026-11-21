@@ -176,8 +176,9 @@ bell = ["flash", "attention"] # flash: the window, when it's in front;
                               # bounces), when it isn't; sound: bell-sound,
                               # else the system alert (Windows only). []
                               # ignores the bell
-# bell-sound = "~/sounds/ding.ogg" # a file the bell plays: wav, mp3, ogg or
-                              # flac; setting it turns sound on. `~/` and
+# bell-sound = "~/sounds/ding.ogg" # a file the bell plays: wav, mp3, flac
+                              # or ogg (Vorbis, not Opus); setting it turns
+                              # sound on. `~/` and
                               # paths next to this file work, and forward
                               # slashes on Windows. Missing or unplayable,
                               # the window says so and the system alert

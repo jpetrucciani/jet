@@ -24,7 +24,9 @@ jet-render = { path = "crates/jet-render" }
 libc = "0.2"
 # Bell and notification sounds: decoding everywhere, playback (cpal) on
 # Windows and macOS. Linux plays through ALSA, dlopened (see sound.rs).
-rodio = { version = "0.23", default-features = false, features = ["flac", "mp3", "vorbis", "wav"] }
+# Decoders: flac, wav, ogg vorbis, mp3, not symphonia's (MPL-2.0, which
+# about.toml doesn't take).
+rodio = { version = "0.23", default-features = false, features = ["claxon", "hound", "lewton", "minimp3"] }
 libghostty-vt = "0.2.2"
 png = "0.18"
 regex = "1"
