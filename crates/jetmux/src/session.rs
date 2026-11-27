@@ -523,7 +523,7 @@ impl Loop {
             self.resize_taps();
             let frame_due = !self.pending.is_empty() && self.last_frame.elapsed() >= FRAME_INTERVAL;
             self.check_watches(frame_due);
-            self.reap_clients();
+            self.reap_clients()?;
             if self.views_dirty {
                 self.send_views();
             }
@@ -1259,7 +1259,7 @@ impl Loop {
         Ok(())
     }
 
-    fn reap_clients(&mut self) {
+    fn reap_clients(&mut self) -> Result<(), BoxError> {
         let closed: Vec<Token> = self
             .clients
             .iter()
@@ -1270,9 +1270,10 @@ impl Loop {
             if let Some(mut conn) = self.clients.remove(&token) {
                 let _ = self.poll.registry().deregister(&mut conn.stream);
             }
-            self.session.remove_client(client_id(token));
+            self.session.remove_client(client_id(token))?;
             self.views_dirty = true;
         }
+        Ok(())
     }
 }
 

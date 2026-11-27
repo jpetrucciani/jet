@@ -30,7 +30,8 @@ jet's own renderer, windowing and app shell.
   running, and before pasting lines a prompt would run (not into programs
   with bracketed paste).
 - **Search** (text or regex) over screen and history, **copy mode** with vi
-  keys, and **quick select** for URLs, paths and hashes.
+  keys, and **quick select** for URLs, paths and hashes, or (Tab in the find
+  bar) whatever a search matched.
 - **Shell integration** for bash, zsh and PowerShell, set up without
   touching your dotfiles: directory reports (OSC 7), prompt marks (OSC 133)
   for jump-to-prompt, copying the last output and showing its exit status.

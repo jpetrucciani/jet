@@ -48,6 +48,8 @@ pub enum Outcome {
     Close,
     /// To the `n`th match up (negative) or down.
     Step(isize),
+    /// Quick select the find bar's matches in view.
+    Hints,
     /// A palette entry was picked.
     Pick(Choice),
     /// Name the tab this (empty: no name of its own).
@@ -250,6 +252,7 @@ impl Find {
                 Outcome::Edited
             }
             Key::Enter | Key::F3 => Outcome::Step(back),
+            Key::Tab => Outcome::Hints,
             Key::ArrowUp => Outcome::Step(-1),
             Key::ArrowDown => Outcome::Step(1),
             _ => edited(self.query.edit(input)),

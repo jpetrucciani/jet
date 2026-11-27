@@ -47,13 +47,17 @@ pub enum Outcome {
 
 /// The terminal size of stdout, falling back to 80x24.
 pub fn terminal_size() -> Size {
-    match rustix::termios::tcgetwinsize(rustix::stdio::stdout()) {
-        Ok(ws) if ws.ws_col > 0 && ws.ws_row > 0 => Size {
-            cols: ws.ws_col,
-            rows: ws.ws_row,
-        },
-        _ => Size { cols: 80, rows: 24 },
-    }
+    known_terminal_size().unwrap_or(Size { cols: 80, rows: 24 })
+}
+
+/// The terminal size of stdout, when it has one. A terminal that's closing
+/// can report none.
+pub fn known_terminal_size() -> Option<Size> {
+    let ws = rustix::termios::tcgetwinsize(rustix::stdio::stdout()).ok()?;
+    (ws.ws_col > 0 && ws.ws_row > 0).then_some(Size {
+        cols: ws.ws_col,
+        rows: ws.ws_row,
+    })
 }
 
 /// Puts the terminal in raw mode and restores it on drop.
@@ -238,9 +242,10 @@ impl Client {
                         let mut outcome = None;
                         for signal in signals.pending() {
                             if signal == SIGWINCH {
-                                let size = terminal_size();
-                                self.renderer.resize(size);
-                                self.send(&ClientMsg::Resize(size))?;
+                                if let Some(size) = known_terminal_size() {
+                                    self.renderer.resize(size);
+                                    self.send(&ClientMsg::Resize(size))?;
+                                }
                             } else {
                                 outcome = Some(Outcome::Disconnected);
                             }

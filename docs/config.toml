@@ -359,7 +359,9 @@ autostart = true              # Windows and macOS: keep `jet quake` running,
 # The find bar searches the focused pane's screen and history as you type,
 # matching case only when the query has capitals. Enter or Up goes to the
 # match above, Shift+Enter or Down the one below, Alt+R switches between
-# text and regular expressions (Rust regex syntax), Escape closes it. The
+# text and regular expressions (Rust regex syntax), Escape closes it. Tab
+# (or the quick_select key) labels the matches in view like quick select
+# does, to copy one by typing its label. The
 # palette runs any of the actions above by name.
 #
 # Copy mode (ctrl+shift+x, cmd+shift+x) puts a cursor on the focused pane:

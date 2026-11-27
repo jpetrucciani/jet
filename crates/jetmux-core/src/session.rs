@@ -461,7 +461,9 @@ impl Session {
         self.fit()
     }
 
-    pub fn remove_client(&mut self, client: ClientId) {
+    /// Remove a client. When it owned the size, the newest client that's
+    /// left and isn't following takes it over.
+    pub fn remove_client(&mut self, client: ClientId) -> Result<(), Error> {
         self.followers.remove(&client);
         self.themes.remove(&client);
         self.cells.remove(&client);
@@ -473,8 +475,14 @@ impl Session {
             self.home = view;
         }
         if self.size_owner == Some(client) {
-            self.size_owner = None;
+            self.size_owner = self
+                .views
+                .keys()
+                .copied()
+                .filter(|c| !self.followers.contains(c))
+                .max();
         }
+        self.fit()
     }
 
     pub fn resize_client(&mut self, client: ClientId, size: Size) -> Result<(), Error> {
@@ -1302,11 +1310,11 @@ mod tests {
         assert_eq!(s.settings.background.r, 1, "whoever acts last");
         s.paste(2, 0, "y").unwrap();
         assert_eq!(s.settings.background.r, 2);
-        s.remove_client(2);
+        s.remove_client(2).unwrap();
         s.paste(1, 0, "z").unwrap();
         assert_eq!(s.settings.background.r, 1);
         // The config's colors hold while no client sent any.
-        s.remove_client(1);
+        s.remove_client(1).unwrap();
         s.set_base(jet_core::VtSettings {
             background: jet_core::Rgb { r: 7, g: 0, b: 0 },
             ..jet_core::VtSettings::default()
@@ -1417,6 +1425,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_leaving_size_owner_hands_the_size_back() {
+        let mut s = session();
+        s.add_client(1, Size { cols: 81, rows: 25 }, false).unwrap();
+        let pane = s.view(1).unwrap().panes[0].id;
+        s.add_client(2, Size { cols: 41, rows: 11 }, false).unwrap();
+        assert_eq!(s.pane_mut(pane).unwrap().size().unwrap().cols, 41);
+        s.remove_client(2).unwrap();
+        assert_eq!(
+            s.pane_mut(pane).unwrap().size().unwrap(),
+            Size { cols: 81, rows: 24 }
+        );
+    }
+
     /// A phone following a desktop session sees the desktop's layout and
     /// can type without resizing anything, until it asks to fit.
     #[test]
@@ -1498,8 +1520,8 @@ mod tests {
         assert_eq!(s.focused(2), Some(new));
 
         // Nobody attached: the next client starts where scripts left it.
-        s.remove_client(1);
-        s.remove_client(2);
+        s.remove_client(1).unwrap();
+        s.remove_client(2).unwrap();
         s.act_on(first, Action::FocusPane(first)).unwrap();
         s.add_client(3, Size { cols: 81, rows: 25 }, false).unwrap();
         assert_eq!(s.focused(3), Some(first));

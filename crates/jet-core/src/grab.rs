@@ -1,9 +1,10 @@
-//! Quick select: labels the URLs, paths, hashes and addresses in view so
-//! typing a label copies one. (Copy mode, the other way to grab text from
+//! Quick select: labels the URLs, paths, hashes and addresses in view (or,
+//! during a search, its matches) so typing a label copies one. (Copy mode, the other way to grab text from
 //! the keyboard, is in [`crate::copy`].)
 
 use std::sync::{Arc, LazyLock};
 
+use jetmux_proto::Matches;
 use libghostty_vt::key::{Action, Key, Mods};
 use regex::Regex;
 
@@ -65,10 +66,19 @@ impl QuickSelect {
         }
     }
 
-    /// Find what's worth picking in `lines` (the viewport) and draw the
-    /// labels of those still matching what was typed over their first cells.
-    pub(crate) fn label(&mut self, lines: &mut [Arc<Line>], colors: &Colors) {
-        self.hints = find(lines);
+    /// Find what's worth picking in `lines` (the viewport), or take the
+    /// search's matches there when one is on, and draw the labels of those
+    /// still matching what was typed over their first cells.
+    pub(crate) fn label(
+        &mut self,
+        lines: &mut [Arc<Line>],
+        colors: &Colors,
+        search: Option<&Matches>,
+    ) {
+        self.hints = match search {
+            Some(matches) => labeled(found(lines, matches)),
+            None => find(lines),
+        };
         let style = Cell {
             fg: Some(colors.background),
             bg: Some(colors.cursor.unwrap_or(colors.foreground)),
@@ -161,6 +171,32 @@ fn find(lines: &[Arc<Line>]) -> Vec<Hint> {
         text.clear();
         cells.clear();
     }
+    labeled(found)
+}
+
+/// The text of a search's matches in `lines`, with where each starts.
+fn found(lines: &[Arc<Line>], matches: &Matches) -> Vec<(u16, u16, String)> {
+    matches
+        .visible
+        .iter()
+        .filter_map(|m| {
+            let line = lines.get(usize::from(m.row))?;
+            let text = m
+                .cols
+                .clone()
+                .map(usize::from)
+                .filter(|&x| line.cells.get(x).is_some_and(|c| c.width != Width::Spacer))
+                .map(|x| match line.cell_text(x) {
+                    "" => " ",
+                    t => t,
+                })
+                .collect();
+            Some((m.row, m.cols.start, text))
+        })
+        .collect()
+}
+
+fn labeled(found: Vec<(u16, u16, String)>) -> Vec<Hint> {
     let labels = labels(found.len());
     found
         .into_iter()

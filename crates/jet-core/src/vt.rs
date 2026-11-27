@@ -731,7 +731,7 @@ impl VtCore {
 
     /// Copy mode, unless it's on already.
     pub fn enter_copy_mode(&mut self) -> Result<(), Error> {
-        self.quick_select = None;
+        self.end_quick_select();
         if self.copy_mode.is_none() {
             self.copy_mode = Some(CopyMode::enter(self)?);
         }
@@ -772,16 +772,26 @@ impl VtCore {
         outcome
     }
 
-    /// Quick select: label the URLs, paths, hashes and addresses in view;
-    /// typing a label copies it (Shift also types it in). Toggles.
+    /// Quick select: label the URLs, paths, hashes and addresses in view,
+    /// or a search's matches there while one is on; typing a label copies
+    /// it (Shift also types it in). Toggles, and takes the search with it
+    /// when it ends.
     pub fn quick_select(&mut self) -> Result<(), Error> {
         self.leave_copy_mode()?;
-        self.quick_select = match self.quick_select.take() {
-            Some(_) => None,
-            None => Some(QuickSelect::new()),
-        };
+        if !self.end_quick_select() {
+            self.quick_select = Some(QuickSelect::new());
+        }
         self.redraw = true;
         Ok(())
+    }
+
+    /// Whether quick select was on.
+    fn end_quick_select(&mut self) -> bool {
+        let on = self.quick_select.take().is_some();
+        if on {
+            self.search = None;
+        }
+        on
     }
 
     /// While copy mode or quick select is on, a key drives it instead of
@@ -803,7 +813,7 @@ impl VtCore {
             self.redraw = true;
             let grabbed = quick.key(input);
             if grabbed.is_some() {
-                self.quick_select = None;
+                self.end_quick_select();
             }
             return Ok(Some(grabbed.unwrap_or(Grabbed::Nothing)));
         }
@@ -838,7 +848,7 @@ impl VtCore {
     /// paste can't fake the end marker), otherwise with newlines sent as
     /// Enter like typing would.
     pub fn encode_paste(&mut self, text: &str) -> Result<Vec<u8>, Error> {
-        if self.copy_mode.take().is_some() || self.quick_select.take().is_some() {
+        if self.copy_mode.take().is_some() | self.end_quick_select() {
             self.redraw = true;
         }
         self.term.scroll_viewport(ScrollViewport::Bottom);
@@ -1382,7 +1392,7 @@ impl VtCore {
 
         let mut snapshot = grid.clone();
         if let Some(quick) = quick_select {
-            quick.label(&mut snapshot.lines, &colors);
+            quick.label(&mut snapshot.lines, &colors, snapshot.search.as_ref());
         }
         Ok(Some(snapshot))
     }
@@ -2104,6 +2114,25 @@ mod tests {
         );
         let snap = vt.snapshot()?.ok_or("labels go")?;
         assert_eq!(row(&snap, 0).as_deref(), Some("see https://jet.dev/x and"));
+        Ok(())
+    }
+
+    #[test]
+    fn quick_select_labels_a_searchs_matches() -> Result<(), Box<dyn std::error::Error>> {
+        let mut vt = VtCore::new(40, 3, 100)?;
+        vt.write(b"pod web-7f9c and\r\npod db-1a2b then");
+        vt.search(r"\w+-\w+", true)?;
+        vt.quick_select()?;
+        let snap = vt.snapshot()?.ok_or("labels draw")?;
+        let row = |y: usize| snap.lines.get(y).map(|l| l.text());
+        assert_eq!(row(0).as_deref(), Some("pod aeb-7f9c and"));
+        assert_eq!(row(1).as_deref(), Some("pod sb-1a2b then"));
+        assert_eq!(
+            mode_keys(&mut vt, "s")?,
+            Some(Grabbed::Copy("db-1a2b".into()))
+        );
+        let snap = vt.snapshot()?.ok_or("labels go")?;
+        assert!(snap.search.is_none(), "the search ends with it");
         Ok(())
     }
 

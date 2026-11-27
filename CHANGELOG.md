@@ -2,6 +2,12 @@
 
 What changed in each release of jet and jetmux, newest first. Link to a version by its heading, dots dropped: `CHANGELOG.md#011` is [0.1.1](#011). A release's GitHub notes start with its section here.
 
+## 0.1.8
+
+- Quick select over a search: Tab in the find bar (or the `quick_select` key) labels the matches in view, and typing a label copies that match. The search ends with it. Not over a jetmux pane.
+- jetmux: when the client that set a session's size detaches, the newest client left that isn't following takes the size over, instead of the panes staying the size of a client that's gone.
+- `jetmux attach` no longer shrinks the session to 80x24 when its terminal reports no size, as one that's closing can.
+
 ## 0.1.7
 
 - Bell and notification sounds: `[terminal] bell-sound` plays a wav, mp3, flac or ogg (Vorbis) file for the bell, `notification-sound` one for desktop notifications (OSC 9, OSC 777), at `sound-volume`. A profile can have its own of each, so an agent that rings for you (Claude Code's terminal bell, Codex's notifications) sounds like itself. A file that's missing or won't play is named in the window, and the bell falls back to the system alert. On Linux jet plays through ALSA, loaded when the first sound plays, so it still starts without it.

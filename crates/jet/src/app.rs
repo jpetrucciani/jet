@@ -2554,7 +2554,9 @@ impl<H: Host> App<H> {
                 }
             }
             Action::QuickSelect => {
-                if let Some(slot) = self.focused_slot() {
+                if matches!(self.overlay, Some(Overlay::Find(_))) {
+                    self.hint_matches();
+                } else if let Some(slot) = self.focused_slot() {
                     slot.pane.quick_select();
                 }
             }
@@ -2659,6 +2661,29 @@ impl<H: Host> App<H> {
         {
             self.relayout(false);
         }
+    }
+
+    /// Hand the find bar's search to quick select, which labels its
+    /// matches in view and ends it when it's done. Nothing without a match,
+    /// or over a jetmux pane, whose quick select isn't jet's.
+    fn hint_matches(&mut self) {
+        let Some(Overlay::Find(find)) = &self.overlay else {
+            return;
+        };
+        let Some(slot) = self.panes.get(&find.pane) else {
+            return;
+        };
+        let matched = slot
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.search.as_ref())
+            .is_some_and(|m| m.total > 0);
+        if !matched || slot.pane.is_remote() {
+            return;
+        }
+        slot.pane.quick_select();
+        self.overlay = None;
+        self.render();
     }
 
     /// Close the find bar (ending its search) or the palette.
@@ -2978,6 +3003,7 @@ impl<H: Host> App<H> {
                 self.preview_theme();
             }
             Outcome::Close => self.close_overlay(),
+            Outcome::Hints => self.hint_matches(),
             Outcome::Step(n) => {
                 if let Some(Overlay::Find(find)) = &self.overlay
                     && let Some(slot) = self.panes.get(&find.pane)
